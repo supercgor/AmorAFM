@@ -1,0 +1,81 @@
+model:
+  net: UNetND
+  checkpoint: ~
+  params:
+    in_size: [10, 100, 100] 
+    in_channels: 1
+    out_size: [4, 32, 32]
+    out_channels: [8,]
+    model_channels: 32 
+    embedding_input: 0
+    embedding_channels: 128
+    num_res_blocks: [1, 1] 
+    attention_resolutions: [4, 8] 
+    dropout: 0.1 
+    channel_mult: [1, 2, 4, 8] 
+    out_conv_blocks: 2
+    out_mult: 1
+    z_down: [1, 2, 4]
+    conv_resample: True 
+    num_heads: 8
+    activation: silu
+    use_gated_conv: False
+    gated_conv_heads: ~
+  losses:
+    cls_weight: 1.0
+    xy_weight: 0.5
+    z_weight: 0.5
+    pos_weight: [5.0, 5.0]
+
+tune_model:
+  checkpoint: outputs/2024-09-25-11-53-06-CYC/cyc_it20000.pkl
+  params:
+    in_size: [10, 100, 100]
+    channels: 1
+    out_conv_blocks: 1
+    model_channels: 16
+    num_res_blocks: [1, 1]
+    attention_resolutions: [4, 8]
+    dropout: 0.0
+    gen_channel_mult: [1, 2, 2, 4]
+    disc_channel_mult: [4, 8, 8]
+    out_mult: 1
+    gen_z_down: [2, 4, 8]
+    disc_z_down: []
+    conv_resample: True
+    num_heads: 8
+    activation: silu
+
+setting:
+  epoch: 30
+  batch_size: 8
+  num_workers: 6
+  pin_memory: True
+  log_every: 100
+  max_save: 5
+
+criterion:
+  lr: 1.0e-4
+  weight_decay: 5.0e-3
+  clip_grad: 5.0
+  cond_weight: 1.0
+  xy_weight: 0.5
+  z_weight: 0.5
+
+  schedular:
+    name: StepLR
+    params:
+      step_size: 3
+      gamma: 0.3
+
+dataset:
+  train_path: datafiles/20240923-bulk-Hup-train
+  test_path:  datafiles/20240923-bulk-Hup-test
+  num_images: [4, 3, 3]
+  image_size: [100, 100]
+  image_split: [10, 18]
+  real_size: [25.0, 25.0, 3.0]
+  ion_type: ['O', 'H']
+
+  split: [0.0, 1.5, 3.0]
+  nms: True

@@ -1,0 +1,50 @@
+model:
+  net: ConditioalVAE
+  checkpoint: ~
+  params:
+    in_channel: 4
+    model_channel: 16 
+    latent_channel: 8
+    in_size: [6, 25, 25] # Z, X, Y
+    channel_mult: [1, 2, 2, 4]
+    z_down: [1, 2]
+    cond_in_size: [2, 25, 25]
+    cond_z_down: [1]
+    attention_resolutions: [4, 8]
+    dropout: 0.0
+    num_res_blocks: 1
+    use_gated_conv: True
+    gated_conv_heads: 16
+
+  losses:
+    conf_weight: 1.0
+    offset_weight: 0.25
+    vae_weight: 1.0
+    pos_weight: 5.0
+
+setting:
+  epoch: 50
+  batch_size: 8
+  num_workers: 6
+  pin_memory: True
+  log_every: 100
+  max_save: 3
+
+dataset:
+  train_path: datafiles/hdf/surface_basal_train.hdf5
+  test_path: datafiles/hdf/surface_basal_test.hdf5
+
+  real_size: [25.0, 25.0, 16.0]
+  ion_type: ['H2O']
+  split: [0.0, 4.0, 8.0, 12.0, 16.0]
+
+criterion:
+  lr: 3.0e-4
+  weight_decay: 0.0
+  clip_grad: 999.9
+  
+  schedular:
+    name: StepLR
+    params:
+      step_size: 1
+      gamma: 0.9
