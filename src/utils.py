@@ -1,73 +1,165 @@
-from ase import Atoms
-from sklearn.cluster import DBSCAN
+import logging
 import numpy as np
-from typing import overload
-from numpy import ndarray
-from torch import Tensor
-from multiprocessing import Pool
+import os
+import sys
+import torch
 import warnings
+import pandas as pd
+
+from ase import Atoms, io
+from multiprocessing import Pool, cpu_count
+from pathlib import Path
+from functools import partial
+from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.distance import cdist
-import torch
-from torch import nn
-from torchvision.utils import make_grid
+from sklearn.cluster import DBSCAN
+from torch import nn, Tensor
 from torch.nn import functional as F
+from torchmetrics import Metric
+from torchvision.utils import make_grid
+from typing import overload
 
-import os
-import warnings
-from ase.atoms import Atoms, Atom
-from ase import io
 
-import numpy as np
-from scipy.spatial import KDTree
-from h5py import File
+def get_logger(name, save_dir = None, level: int = logging.INFO):
+    handler: list = [logging.StreamHandler(stream=sys.stdout)]
+    if save_dir is not None:
+        handler.append(logging.FileHandler(Path(save_dir) / f"log.txt"))
+    
+    logging.basicConfig(level=logging.INFO, handlers=handler)
+    
+    return logging.getLogger(name)
+
+
+def log_to_csv(path, **kwargs):
+    for k, v in kwargs.items():
+        if isinstance(v, Tensor):
+            kwargs[k] = v.detach().cpu().numpy()
+            
+    df = pd.DataFrame([kwargs])
+    if not os.path.isfile(path):
+        df.to_csv(path, index=False)
+    else:
+        df.to_csv(path, mode='a', header=False, index=False)
+
+
+class ItLoader(Sampler):
+    def __init__(self, dts, iters, shuffle = False):
+        self.dts = dts
+        self.iters = iters
+        self.shuffle = shuffle
+        self.dataiter = iter(self.dts)
+    
+    def __iter__(self):
+        if self.shuffle:
+            idxs = np.random.permutation(len(self.dts))
+        else:
+            idxs = np.arange(len(self.dts))
+        
+        iters = 0
+        while iters < self.iters:
+            for i in idxs:
+                yield i
+                iters += 1
+                if iters >= self.iters:
+                    break
+            else:
+                if self.shuffle:
+                    idxs = np.random.permutation(len(self.dts))
+    
+    def __len__(self):
+        return self.iters        
+
+
+class MetricCollection:
+    def __init__(self, *args: Metric, **kwargs: Metric):
+        if len(args) > 0:
+            self.keys = list(map(str, range(len(args))))
+            self._metrics = dict(zip(self.keys, args))
+        elif len(kwargs) > 0:
+            self.keys = list(kwargs.keys())
+            self._metrics = kwargs
+        else:
+            raise ValueError("At least one metric should be provided")
+    
+    def update(self, *args, **kwargs):
+        if len(args) > 0:
+            for k in self.keys:
+                if isinstance(args, (tuple, list)):
+                    self._metrics[k].update(*args)
+                else:
+                    self._metrics[k].update(args)
+        else:
+            for k, v in kwargs.items():
+                if isinstance(v, (tuple, list)):
+                    self._metrics[k].update(*v)
+                else:
+                    self._metrics[k].update(v)
+    
+    def compute(self):
+        return {k: v.compute() for k, v in self._metrics.items()}
+    
+    def __call__(self, *args, **kwargs):
+        outs = {}
+        if len(args) > 0:
+            for k in self.keys:
+                if isinstance(args, (tuple, list)):
+                    v = self._metrics[k](*args)
+                else:
+                    v = self._metrics[k](args)
+                outs[k] = v    
+        else:
+            for k, v in kwargs.items():
+                if isinstance(v, (tuple, list)):
+                    v = self._metrics[k](*v)
+                else:
+                    v = self._metrics[k](v)
+                outs[k] = v
+        return outs
+        
+    def reset(self):
+        for v in self._metrics.values():
+            v.reset()
+    
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._metrics[self.keys[key]]
+        else:
+            return self._metrics[key]
+    
+    def to(self, device):
+        for v in self._metrics.values():
+            v.to(device)
+        return self
+    
 
 def box2vec(box_cls, box_off, *args, threshold=0.5):
     """
     _summary_
 
     Args:
-        box_cls (Tensor): X Y Z
-        box_off (Tensor): X Y Z (ox, oy, oz)
-        args (tuple[ Tensor]): X Y Z *
+        box_cls (Tensor): Y X Z
+        box_off (Tensor): Y X Z (ox, oy, oz)
+        args (tuple[ Tensor]): Y X Z *
     Returns:
         tuple[Tensor]: (N, ), (N, 3), N
     """
-    if isinstance(box_cls, Tensor):
-        return _box2vec_th(box_cls, box_off, *args, threshold=threshold)
-    elif isinstance(box_cls, np.ndarray):
-        return _box2vec_np(box_cls, box_off, *args, threshold=threshold)
-
-
-def _box2vec_np(box_cls, box_off, *args, threshold=0.5):
-    box_size = box_cls.shape
+    X, Y, Z = box_cls.shape
     mask = np.nonzero(box_cls > threshold)
     box_cls = box_cls[mask]
     box_off = box_off[mask] + np.stack(mask, axis=-1)
-    box_off = box_off / box_size
+    box_off = box_off / [X, Y, Z]
+    # box_off = box_off[:, [1, 0, 2]] / [Y, X, Z]
+    # box_off[:, 1] = 1 - box_off[:, 1]
     args = [arg[mask] for arg in args]
     return box_cls, box_off, *args
-
-
-def _box2vec_th(box_cls, box_off, *args, threshold=0.5):
-    box_size = box_cls.shape
-    mask = torch.nonzero(box_cls > threshold, as_tuple=True)
-    box_cls = box_cls[mask]
-    box_off = box_off[mask] + torch.stack(mask, dim=-1)
-    box_off = box_off / torch.as_tensor(
-        box_size, dtype=box_cls.dtype, device=box_cls.device)
-    args = [arg[mask] for arg in args]
-    return box_cls, box_off, *args
-
-
-@overload
-def masknms(pos: ndarray, cutoff: float) -> ndarray:
-    ...
-
-
-@overload
-def masknms(pos: Tensor, cutoff: float) -> Tensor:
-    ...
+    # Y, X, Z = box_cls.shape
+    # mask = np.nonzero(box_cls > threshold)
+    # box_cls = box_cls[mask]
+    # box_off = box_off[mask] + np.stack([mask[1], mask[0] - Y, mask[2]], axis=-1)
+    # box_off = box_off / [X, -Y, Z]
+    # args = [arg[mask] for arg in args]
+    # return box_cls, box_off, *args
 
 
 def masknms(pos, cutoff):
@@ -103,45 +195,6 @@ def _masknms_th(pos, cutoff):
                 (pos[i + 1:] - pos[i])**2, dim=1) > cutoff**2)
     return mask
 
-
-# def _masknms_np(pos: ndarray, cutoff: float) -> ndarray:
-#     dis = cdist(pos, pos) < cutoff
-#     dis = np.triu(dis, 1).astype(float)
-#     args = np.ones(pos.shape[0], dtype = bool)
-#     while True:
-#         N = pos.shape[0]
-#         restrain_tensor = dis.sum(0)
-#         restrain_tensor -= (restrain_tensor != 0).astype(float) @ dis
-#         SELECT = restrain_tensor == 0
-#         dis = dis[SELECT][:, SELECT]
-#         pos = pos[SELECT]
-#         args[args.nonzero()] = SELECT
-#         if N == pos.shape[0]:
-#             break
-#     return args
-
-# def _masknms_th(pos: Tensor, cutoff: float) -> Tensor:
-#     dis = torch.cdist(pos, pos) < cutoff
-#     dis = torch.triu(dis, 1).float()
-#     args = torch.ones(pos.shape[0], dtype = torch.bool, device = pos.device)
-#     while True:
-#         N = pos.shape[0]
-#         restrain_tensor = dis.sum(0)
-#         restrain_tensor -= ((restrain_tensor != 0).float() @ dis)
-#         SELECT = restrain_tensor == 0
-#         dis = dis[SELECT][:, SELECT]
-#         pos = pos[SELECT]
-#         args[args.nonzero(as_tuple=True)] = SELECT
-#         if N == pos.shape[0]:
-#             break
-#     return args
-
-# @overload
-# def argmatch(pred: ndarray, targ: ndarray, cutoff: float) -> tuple[ndarray, ...]: ...
-# @overload
-# def argmatch(pred: Tensor, targ: Tensor, cutoff: float) -> tuple[Tensor, ...]: ...
-
-
 def argmatch(pred, targ, cutoff):
     # This function is only true when one prediction does not match two targets and one target can match more than two predictions
     # return pred_ind, targ_ind
@@ -151,8 +204,8 @@ def argmatch(pred, targ, cutoff):
         return _argmatch_np(pred, targ, cutoff)
 
 
-def _argmatch_np(pred: ndarray, targ: ndarray,
-                 cutoff: float) -> tuple[ndarray, ...]:
+def _argmatch_np(pred: np.ndarray, targ: np.ndarray,
+                 cutoff: float) -> tuple[np.ndarray, ...]:
     dis = cdist(targ, pred)
     dis = np.stack((dis < cutoff).nonzero(), axis=-1)
     dis = dis[:, (1, 0)]
@@ -230,18 +283,8 @@ def box2orgvec(box,
     Returns:
         tuple[Tensor]: `conf (N,)`, `pos (N, 3)`, `R (N, 3, 3)`
     """
-    if isinstance(box, Tensor):
-        return _box2orgvec_th(box, threshold, cutoff, real_size, sort, nms)
-    elif isinstance(box, np.ndarray):
-        return _box2orgvec_np(box, threshold, cutoff, real_size, sort, nms)
-
-
-def _box2orgvec_np(box, threshold, cutoff, real_size, sort,
-                   nms) -> tuple[ndarray, ...]:
     if box.shape[-1] == 4:
-        pd_conf, pd_pos = box2vec(box[..., 0:1],
-                                  box[..., 1:4],
-                                  threshold=threshold)
+        pd_conf, pd_pos, *_ = box2vec(box[..., 0], box[..., 1:4], threshold=threshold)
         pd_pos = pd_pos * real_size
         if sort:
             pd_conf_order = pd_conf.argsort()[::-1]
@@ -250,14 +293,11 @@ def _box2orgvec_np(box, threshold, cutoff, real_size, sort,
             pd_nms_mask = masknms(pd_pos, cutoff)
             pd_conf = pd_conf[pd_nms_mask]
             pd_pos = pd_pos[pd_nms_mask]
+            
         return pd_conf, pd_pos
 
     elif box.shape[-1] == 10:
-        pd_conf, pd_pos, pd_rotx, pd_roty = box2vec(box[..., 0],
-                                                    box[..., 1:4],
-                                                    box[..., 4:7],
-                                                    box[..., 7:10],
-                                                    threshold=threshold)
+        pd_conf, pd_pos, pd_rotx, pd_roty = box2vec(box[..., 0], box[..., 1:4], box[..., 4:7], box[..., 7:10], threshold=threshold)
         pd_rotz = np.cross(pd_rotx, pd_roty)
         pd_R = np.stack([pd_rotx, pd_roty, pd_rotz], axis=-2)
         if sort:
@@ -276,179 +316,75 @@ def _box2orgvec_np(box, threshold, cutoff, real_size, sort,
             f"Require the last dimension of the box to be 4 or 10, but got {box.shape[-1]}"
         )
 
-
-def _box2orgvec_th(box, threshold, cutoff, real_size, sort, nms):
-    if box.shape[-1] == 4:
-        pd_conf, pd_pos = box2vec(box[..., 0],
-                                  box[..., 1:4],
-                                  threshold=threshold)
-        pd_pos = pd_pos * torch.as_tensor(
-            real_size, dtype=pd_pos.dtype, device=pd_pos.device)
-        if sort:
-            pd_conf_order = pd_conf.argsort(descending=True)
-            pd_pos = pd_pos[pd_conf_order]
-
-        if nms:
-            pd_nms_mask = masknms(pd_pos, cutoff)
-            pd_conf = pd_conf[pd_nms_mask]
-            pd_pos = pd_pos[pd_nms_mask]
-
-        return pd_conf, pd_pos
-
-    elif box.shape[-1] == 10:
-        pd_conf, pd_pos, pd_rotx, pd_roty = box2vec(box[..., 0],
-                                                    box[..., 1:4],
-                                                    box[..., 4:7],
-                                                    box[..., 7:10],
-                                                    threshold=threshold)
-        pd_pos = pd_pos * torch.as_tensor(
-            real_size, dtype=pd_pos.dtype, device=pd_pos.device)
-        pd_rotz = torch.cross(pd_rotx, pd_roty, dim=-1)
-        pd_R = torch.stack([pd_rotx, pd_roty, pd_rotz], dim=-2)
-
-        if sort:
-            pd_conf_order = pd_conf.argsort(descending=True)
-            pd_pos = pd_pos[pd_conf_order]
-            pd_R = pd_R[pd_conf_order]
-
-        if nms:
-            pd_nms_mask = masknms(pd_pos, cutoff)
-            pd_conf = pd_conf[pd_nms_mask]
-            pd_pos = pd_pos[pd_nms_mask]
-            pd_R = pd_R[pd_nms_mask]
-
-        return pd_conf, pd_pos, pd_R
-
-    else:
-        raise ValueError(
-            f"Require the last dimension of the box to be 4 or 10, but got {box.shape[-1]}"
-        )
-
-
-@overload
-def vec2box(unit_pos: ndarray, vec: ndarray | None,
-            box_size: tuple[int, int, int]) -> ndarray:
-    ...
-
-
-@overload
-def vec2box(unit_pos: Tensor, vec: Tensor | None,
-            box_size: tuple[int, int, int]) -> Tensor:
-    ...
-
+# def vec2box(unit_pos, vec=None, box_size=(25, 25, 12)):
+#     vec_dim = 0 if vec is None else vec.shape[-1]
+#     box = np.zeros((box_size[1], box_size[0], box_size[2], 4 + vec_dim))
+#     unit_pos = np.clip(unit_pos, 0, 1 - 1E-7)
+#     unit_pos[:, 1] = 1 - unit_pos[:, 1]
+#     pd_ind = np.floor(unit_pos * box_size).astype(np.int_)
+#     pd_off = unit_pos * box_size - pd_ind
+#     if vec is None:
+#         feature = np.concatenate([np.ones((unit_pos.shape[0], 1)), pd_off],
+#                                     axis=-1)
+#     else:
+#         feature = np.concatenate(
+#             [np.ones((unit_pos.shape[0], 1)), pd_off, vec], axis=-1)
+#     box[pd_ind[:, 1], pd_ind[:, 0], pd_ind[:, 2]] = feature
+#     return box
 
 def vec2box(unit_pos, vec=None, box_size=(25, 25, 12)):
     vec_dim = 0 if vec is None else vec.shape[-1]
-    if isinstance(unit_pos, Tensor):
-        box = torch.zeros((*box_size, 4 + vec_dim),
-                          dtype=unit_pos.dtype,
-                          device=unit_pos.device)
-        box_size = torch.as_tensor(box_size,
-                                   dtype=unit_pos.dtype,
-                                   device=unit_pos.device)
-        pd_ind = torch.floor(unit_pos.clamp(0, 1 - 1E-7) *
-                             box_size[None]).long()
-        all_same = ((pd_ind[None] - pd_ind[:, None]) == 0).all(dim=-1)
-        all_same.fill_diagonal_(False)
-        if all_same.any():
-            warnings.warn(
-                f"There are same positions in the unit_pos: \n {pd_ind[all_same.nonzero(as_tuple=True)[0]]}"
-            )
-
-        pd_off = unit_pos * box_size - pd_ind
-        if vec is not None:
-            feature = torch.cat([
-                torch.ones(unit_pos.shape[0],
-                           1,
-                           dtype=torch.float,
-                           device=unit_pos.device), pd_off, vec
-            ],
-                                dim=-1)
-        else:
-            feature = torch.cat([
-                torch.ones(unit_pos.shape[0],
-                           1,
-                           dtype=torch.float,
-                           device=unit_pos.device), pd_off
-            ],
-                                dim=-1)
-        box[pd_ind[:, 0], pd_ind[:, 1], pd_ind[:, 2]] = feature
+    box = np.zeros((box_size[0], box_size[1], box_size[2], 4 + vec_dim))
+    unit_pos = np.clip(unit_pos, 0, 1 - 1E-7)
+    pd_ind = np.floor(unit_pos * box_size).astype(np.int_)
+    pd_off = unit_pos * box_size - pd_ind
+    if vec is None:
+        feature = np.concatenate([np.ones((unit_pos.shape[0], 1)), pd_off], axis=-1)
     else:
-        box = np.zeros((*box_size, 4 + vec_dim))
-        pd_ind = np.floor(np.clip(unit_pos, 0, 1 - 1E-7) *
-                          box_size).astype(int)
-        pd_off = unit_pos * box_size - pd_ind
-        if vec is None:
-            feature = np.concatenate([np.ones((unit_pos.shape[0], 1)), pd_off],
-                                     axis=-1)
-        else:
-            feature = np.concatenate(
-                [np.ones((unit_pos.shape[0], 1)), pd_off, vec], axis=-1)
-        box[pd_ind[:, 0], pd_ind[:, 1], pd_ind[:, 2]] = feature
+        feature = np.concatenate([np.ones((unit_pos.shape[0], 1)), pd_off, vec], axis=-1)
+    box[pd_ind[:, 0], pd_ind[:, 1], pd_ind[:, 2]] = feature
     return box
 
-
-@torch.no_grad()
 def box2atom(box,
              cell=[25.0, 25.0, 16.0],
              threshold=0.5,
-             cutoff: float | tuple[float, ...] = 2.0,
+             cutoff: float | tuple[float, float] = 2.0,
              mode='O',
              nms=True,
-             num_workers=0) -> list[Atoms] | Atoms:
+             num_workers = 1
+             ):
     
-    if box.dim() > 4:
-        if num_workers == 0:
-            return list(
-                box2atom(b, cell, threshold, cutoff, mode=mode, nms=nms)
-                for b in box)
+    if box.ndim > 4:
+        if num_workers > 1:
+            fn = partial(box2atom, cell=cell, threshold=threshold, cutoff=cutoff, mode=mode, nms=nms)
+            with Pool() as p:
+                return p.map(fn, box)
         else:
-            with Pool(num_workers) as p:
-                return p.starmap(box2atom,
-                                 [(b, cell, threshold, cutoff, mode, nms)
-                                  for b in box])
-    else:
-        if mode == 'O':
-            confidence, positions = box2orgvec(box,
-                                               threshold,
-                                               cutoff,
-                                               cell,
-                                               sort=True,
-                                               nms=nms)
-            if isinstance(positions, Tensor):
-                confidence = confidence.detach().cpu().numpy()
-                positions = positions.detach().cpu().numpy()
-            atoms = Atoms("O" * positions.shape[0],
-                          positions,
-                          cell=cell,
-                          pbc=False)
-            atoms.set_array('conf', confidence)
-        elif mode == 'OH':
-            o_conf, o_pos = box2orgvec(box[..., :4],
-                                       threshold,
-                                       cutoff[0],
-                                       cell,
-                                       sort=True,
-                                       nms=nms)
-            h_conf, h_pos = box2orgvec(box[..., 4:],
-                                       threshold,
-                                       cutoff[1],
-                                       cell,
-                                       sort=True,
-                                       nms=nms)
-            atom1 = Atoms("O" * o_pos.shape[0], o_pos, cell=cell, pbc=False)
-            atom1.set_array('conf', o_conf.numpy())
-            atom2 = Atoms("H" * h_pos.shape[0], h_pos, cell=cell, pbc=False)
-            atom2.set_array('conf', h_conf.numpy())
-            atoms = atom1 + atom2
+            return list(map(lambda x: box2atom(x, cell=cell, threshold=threshold, cutoff=cutoff, mode=mode, nms=nms), box))
+            
+    elif mode == "O":
+        assert isinstance(cutoff, float), "In O mode, cutoff should be a float"
+        confidence, positions, *_ = box2orgvec(box, threshold, cutoff, cell, sort=True, nms=nms)
+
+        atoms = Atoms("O" * positions.shape[0], positions, cell=cell, pbc=False)
+        atoms.set_array('conf', confidence)
+    elif mode == 'OH':
+        assert isinstance(cutoff, tuple), "In OH mode, cutoff should be a tuple"
+        o_conf, o_pos, *_ = box2orgvec(box[..., :4], threshold, cutoff[0], cell, sort=True, nms=nms)
+        h_conf, h_pos, *_ = box2orgvec(box[..., 4:], threshold, cutoff[1], cell, sort=True, nms=nms)
+        atom1 = Atoms("O" * o_pos.shape[0], o_pos, cell=cell, pbc=False)
+        atom2 = Atoms("H" * h_pos.shape[0], h_pos, cell=cell, pbc=False)
+        atom1.set_array('conf', o_conf)
+        atom2.set_array('conf', h_conf)
+        atoms = atom1 + atom2
     return atoms
 
 
-def makewater(pos: ndarray, rot: ndarray):
+def makewater(pos: np.ndarray, rot: np.ndarray):
     # N 3, N 3 3 -> N 3 3
-    if not isinstance(pos, ndarray):
+    if not isinstance(pos, np.ndarray):
         pos = pos.detach().cpu().numpy()
-    if not isinstance(rot, ndarray):
+    if not isinstance(rot, np.ndarray):
         rot = rot.detach().cpu().numpy()
 
     water = np.array([
@@ -461,7 +397,6 @@ def makewater(pos: ndarray, rot: ndarray):
     return np.einsum("ij,Njk->Nik", water, rot) + pos[:, None, :]
 
 
-@torch.jit.script
 def __encode_th(positions):
     positions = positions.reshape(-1, 9)
     o, u, v = positions[..., 0:3], positions[..., 3:6], positions[..., 6:]
@@ -473,8 +408,7 @@ def __encode_th(positions):
     return torch.cat([o, u, v], dim=-1)
 
 
-#@nb.njit(fastmath=True, cache=True)
-def __encode_np(positions: ndarray):
+def __encode_np(positions: np.ndarray):
     positions = positions.reshape(-1, 9)
     o, u, v = positions[..., 0:3], positions[..., 3:6], positions[..., 6:]
     u, v = u + v - 2 * o, u - v
@@ -485,7 +419,6 @@ def __encode_np(positions: ndarray):
     return np.concatenate((o, u, v), axis=-1)
 
 
-@torch.jit.script
 def __decode_th(emb):
     o, u, v = emb[..., 0:3], emb[..., 3:6], emb[..., 6:]
     h1 = (0.612562225 * u + 0.790422368 * v) * 0.9584 + o
@@ -493,7 +426,6 @@ def __decode_th(emb):
     return torch.cat([o, h1, h2], dim=-1)
 
 
-# @nb.njit(fastmath=True,parallel=True, cache=True)
 def __decode_np(emb):
     o, u, v = emb[..., 0:3], emb[..., 3:6], emb[..., 6:]
     h1 = (0.612562225 * u + 0.790422368 * v) * 0.9584 + o
@@ -502,7 +434,7 @@ def __decode_np(emb):
 
 
 def encodewater(positions):
-    if isinstance(positions, Tensor):
+    if isinstance(positions, torch.Tensor):
         return __encode_th(positions)
     else:
         return __encode_np(positions)
@@ -515,7 +447,7 @@ def decodewater(emb):
         return __decode_np(emb)
 
 
-def rotate(points, rotation_vector: ndarray):
+def rotate(points, rotation_vector: np.ndarray):
     """
     Rotate the points with rotation_vector.
 
@@ -547,7 +479,7 @@ def logit(x, eps=1E-7):
         return torch.logit(x, eps)
 
 
-def replicate(points: ndarray, times: list[int], offset: ndarray) -> ndarray:
+def replicate(points: np.ndarray, times: list[int], offset: np.ndarray) -> np.ndarray:
     """
     Replicate the points with times and offset.
 
@@ -645,7 +577,6 @@ def combine_atoms(atom_list: list[Atoms], eps=0.5):
 
 
 class view(object):
-
     @staticmethod
     def space_to_image(tensor: Tensor):
         "C H W D -> (C D) 1 H W"
@@ -665,105 +596,6 @@ class view(object):
         images = torch.cat([grid, afm], dim=1)  # Z 3 Y X
         images = make_grid(images)
         return images
-
-
-class PointCloudProjector():
-
-    def __init__(self,
-                 real_size=(25.0, 25.0, 16.0),
-                 box_size=(25, 25, 16),
-                 kernel_size=5,
-                 sigma=0.6):
-        self.sigma = sigma
-        self.dim = len(real_size)
-        if isinstance(kernel_size, int):
-            kernel_size = [kernel_size] * self.dim
-        self.real_size = np.array(real_size)
-        self.box_size = np.array(box_size)
-        self.kernel_size = np.array(kernel_size)
-        # (k * k * k) * 3
-        self.k_ind_offset = np.stack(np.meshgrid(
-            *[np.arange(-(k - 1) // 2, (k - 1) // 2 + 1) for k in kernel_size],
-            indexing='ij'),
-                                     axis=-1).reshape(-1, self.dim)
-        # print(self.k_ind_offset.shape)
-        self.k_pos_offset = self.k_ind_offset * (self.real_size /
-                                                 self.box_size)
-        self.k_pad = np.concatenate(
-            [self.kernel_size // 2, (self.kernel_size - 1) // 2])
-        # self.pad = [min(self.k_ind_offset),]
-        # print(self.k_ind_offset.shape)
-
-    def gaussian_function(self, x, mu, sigma, norm=True):
-        # x: (*, 3)
-        if norm:
-            return np.prod(np.exp(-(x - mu)**2 / (2 * sigma**2)), axis=-1)
-        else:
-            return np.prod(1 / (sigma * np.sqrt(2 * np.pi)) *
-                           np.exp(-(x - mu)**2 / (2 * sigma**2)),
-                           axis=-1)
-
-    def __call__(self, pc: np.ndarray):
-        # pc: (*, N, 3)
-        box_shape = [*pc.shape[:-2], *self.box_size]
-        box = np.zeros(box_shape)
-        pos_ind = (pc / self.real_size * self.box_size).astype(int)
-        pos_offset = pc / self.real_size * self.box_size - pos_ind
-        pos_ind = pos_ind[..., None, :] + self.k_ind_offset
-        pos_offset = pos_offset[..., None, :] + self.k_pos_offset
-        mask = (pos_ind >= 0).all(axis=-1) & (pos_ind
-                                              < self.box_size).all(axis=-1)
-        pos_ind = pos_ind[mask]
-        batch_ind = np.nonzero(mask)[:-2]
-        if len(batch_ind) > 0:
-            batch_ind = np.stack(batch_ind, axis=-1)
-            pos_ind = np.concatenate([batch_ind, pos_ind], axis=-1)
-
-        pos_offset = pos_offset[mask] - 0.5 * self.box_size / self.real_size
-        gauss_pos = self.gaussian_function(pos_offset, 0, self.sigma)
-
-        np.add.at(box, tuple(pos_ind.T), gauss_pos)
-
-        return box
-
-def write_array(file: File, name: str, array: np.ndarray, property: dict = {}):
-    dts = file.create_dataset(name, data=array)
-    for key, val in property.items():
-        dts.attrs[key] = val
-    return dts
-
-def write_dict(file: File, name: str, dic: dict, property: dict = {}):
-    group = file.create_group(name)
-    for key, val in dic.items():
-        group[key] = val
-    for key, val in property.items():
-        group.attrs[key] = val
-    return group
-
-def load_by_name(file: File, name: str):
-    atom_keys = ['positions', 'numbers', 'cell', 'pbc']
-    dic = dict(file[name].items())
-    dic.update(file[name].attrs.items())
-    atom_dic = {key: val[...] for key, val in dic.items() if key in atom_keys}
-    info_dic = {key: val if isinstance(val, str) else val[...] for key, val in dic.items() if key not in atom_keys}
-    info_dic['name'] = name
-    atom_dic['info'] = info_dic
-    atoms = Atoms.fromdict(atom_dic)
-    return atoms
-
-def write_atoms(file: File, name: str, atoms: Atoms):
-    atom_dic = atoms.todict()
-    for val in atom_dic.values():
-        if isinstance(val, np.ndarray):
-            if val.dtype == np.float64:
-                val = val.astype(np.float32)
-            elif val.dtype == np.int64:
-                val = val.astype(np.int32)
-
-    return write_dict(file, name, atom_dic)
-
-def list_names(file: File):
-    return list(file.keys())
 
 def write_water_data(atoms, 
                      fname, 
@@ -880,3 +712,202 @@ Angles
                 val = list(map(lambda x: f"{x:4d}", val))
                 for i in range(0, len(val), 15):
                     f.write(" ".join(val[i:i+15]) + "\n")
+
+
+class ConfusionMatrix(Metric):
+    def __init__(self, 
+                 count_types: tuple[str, ...] = ("O", "H"),
+                 real_size: tuple[float, ...] = (25.0, 25.0, 3.0), 
+                 match_distance: float = 1.0, 
+                 split: list[float] = [0.0, 3.0]
+                 ):
+        super().__init__()
+        self.register_buffer("_real_size", torch.as_tensor(real_size, dtype=torch.float))
+        # TP, FP, FN, AP, AR, F1, SUC
+        self.add_state("matrix", default = torch.zeros((len(count_types), len(split) - 1, 7), dtype = torch.float), dist_reduce_fx = "sum")
+        self.add_state("total", default = torch.tensor([0]), dist_reduce_fx = "sum")
+        
+        self.count_types = count_types
+        self.match_distance = match_distance
+        self.split = split
+        self.split[-1] += 1e-5
+    
+    def update(self, preds: list[Atoms], targs: list[Atoms]):
+        if isinstance(preds, Atoms):
+            preds = [preds]
+        if isinstance(targs, Atoms):
+            targs = [targs]
+            
+        for b, (pred, targ) in enumerate(zip(preds, targs)):
+            for t, count_type in enumerate(self.count_types):
+                pre = pred[pred.symbols == count_type].positions
+                tar = targ[targ.symbols == count_type].positions
+                
+                pd_match_ids, tg_match_ids = argmatch(pre, tar, self.match_distance)
+                
+                match_pd_pos = pre[pd_match_ids] # N 3
+                match_tg_pos = tar[tg_match_ids] # N 3
+                
+                mask = np.isin(range(len(pre)), pd_match_ids, invert=True)
+                non_match_pd_pos = pre[mask] # N 3
+                mask = np.isin(range(len(tar)), tg_match_ids, invert=True)
+                non_match_tg_pos = tar[mask]
+                
+                
+                for i, (low, high) in enumerate(zip(self.split[:-1], self.split[1:])):
+                    num_non_match_pd = ((non_match_pd_pos[:, 2] >= low) & (non_match_pd_pos[:, 2] < high)).sum() # FP
+                    num_non_match_tg = ((non_match_tg_pos[:, 2] >= low) & (non_match_tg_pos[:, 2] < high)).sum() # FN
+                    num_match = ((match_tg_pos[:, 2] >= low) & (match_tg_pos[:, 2] < high)).sum() # TP
+                    self.matrix[t, i, 0] += num_match # TP
+                    self.matrix[t, i, 1] += num_non_match_pd # FP
+                    self.matrix[t, i, 2] += num_non_match_tg # FN
+                    self.matrix[t, i, 3] += num_match / (num_non_match_pd + num_match) if num_match > 0 else 1 if num_non_match_pd == 0 else 0 # AP
+                    self.matrix[t, i, 4] += num_match / (num_non_match_tg + num_match) if num_match > 0 else 1 if num_non_match_tg == 0 else 0 # AR
+                    self.matrix[t, i, 5] += 2 * num_match / (num_non_match_pd + num_non_match_tg + 2 * num_match) if num_match > 0 else 1 if (num_non_match_pd + num_non_match_tg) == 0 else 0 # F1
+                    self.matrix[t, i, 6] += (num_non_match_pd == 0) & (num_non_match_tg == 0) # SUC
+                
+            self.total += 1
+                    
+    def compute(self):
+        out = self.matrix.clone()
+        out[:, :, 3:] = out[:, :, 3:] / self.total
+        return out
+    
+class MeanAbsoluteDistance(Metric):
+    def __init__(self, 
+                 count_types: tuple[str, ...] = ("O", "H"),
+                 real_size: tuple[float, ...] = (25.0, 25.0, 3.0), 
+                 match_distance: float = 1.0, 
+                 split: list[float] = [0.0, 3.0]
+                 ):
+        super().__init__()
+        self.register_buffer("_real_size", torch.as_tensor(real_size, dtype=torch.float))
+        # TP, FP, FN, AP, AR, ACC, SUC
+        self.add_state("RDE", default = torch.zeros(len(count_types), len(split) - 1), dist_reduce_fx = "sum")
+        self.add_state("TOT", default = torch.zeros(len(count_types), len(split) - 1), dist_reduce_fx = "sum")
+        
+        self.count_types = count_types
+        self.match_distance = match_distance
+        self.split = split
+        self.split[-1] += 1e-5
+    
+    def update(self, preds: list[Atoms], targs: list[Atoms]):
+        if isinstance(preds, Atoms):
+            preds = [preds]
+        if isinstance(targs, Atoms):
+            targs = [targs]
+            
+        for b, (pred, targ) in enumerate(zip(preds, targs)):
+            for t, count_type in enumerate(self.count_types):
+                pre = pred[pred.symbols == count_type].positions
+                tar = targ[targ.symbols == count_type].positions
+                
+                pd_match_ids, tg_match_ids = lib.argmatch(pre, tar, self.match_distance)
+                
+                match_pd_pos = pre[pd_match_ids] # N 3
+                match_tg_pos = tar[tg_match_ids] # N 3
+                
+                for i, (low, high) in enumerate(zip(self.split[:-1], self.split[1:])):
+                    mask = (match_tg_pos[:, 2] >= low) & (match_tg_pos[:, 2] < high)
+                    self.RDE[t, i] += np.linalg.norm(match_pd_pos[mask] - match_tg_pos[mask], axis = 1).sum()
+                    self.TOT[t, i] += mask.sum()
+
+    def compute(self):
+        return self.RDE / self.TOT
+    
+class MeanSquareDistance(Metric):
+    def __init__(self, 
+                 count_types: tuple[str, ...] = ("O", "H"),
+                 real_size: tuple[float, ...] = (25.0, 25.0, 3.0), 
+                 match_distance: float = 1.0, 
+                 split: list[float] = [0.0, 3.0]
+                 ):
+        super().__init__()
+        self.register_buffer("_real_size", torch.as_tensor(real_size, dtype=torch.float))
+        # TP, FP, FN, AP, AR, ACC, SUC
+        self.add_state("RDE", default = torch.zeros(len(count_types), len(split) - 1), dist_reduce_fx = "sum")
+        self.add_state("TOT", default = torch.zeros(len(count_types), len(split) - 1), dist_reduce_fx = "sum")
+        
+        self.RDE: torch.Tensor
+        self.TOT: torch.Tensor
+        
+        self.count_types = count_types
+        self.match_distance = match_distance
+        self.split = split
+        self.split[-1] += 1e-5
+    
+    def update(self, preds: list[Atoms], targs: list[Atoms]):
+        if isinstance(preds, Atoms):
+            preds = [preds]
+        if isinstance(targs, Atoms):
+            targs = [targs]
+            
+        for b, (pred, targ) in enumerate(zip(preds, targs)):
+            for t, count_type in enumerate(self.count_types):
+                pre = pred[pred.symbols == count_type].positions
+                tar = targ[targ.symbols == count_type].positions
+                
+                pd_match_ids, tg_match_ids = argmatch(pre, tar, self.match_distance)
+                
+                match_pd_pos = pre[pd_match_ids] # N 3
+                match_tg_pos = tar[tg_match_ids] # N 3
+                
+                for i, (low, high) in enumerate(zip(self.split[:-1], self.split[1:])):
+                    mask = (match_tg_pos[:, 2] >= low) & (match_tg_pos[:, 2] < high)
+                    self.RDE[t, i] += np.square(np.linalg.norm(match_pd_pos[mask] - match_tg_pos[mask], axis = 1)).sum()
+                    self.TOT[t, i] += mask.sum()
+
+    def compute(self):
+        return self.RDE / self.TOT
+    
+class ValidProbability(Metric):
+    def __init__(self, 
+                 real_size: tuple[float, ...] = (25.0, 25.0, 3.0), 
+                 match_distance: float = 1.1, 
+                 split: list[float] = [0.0, 3.0]
+                 ):
+        super().__init__()
+        self.register_buffer("_real_size", torch.as_tensor(real_size, dtype=torch.float))
+        # TP, FP, FN, AP, AR, ACC, SUC
+        self.add_state("VAL", default = torch.zeros(2, len(split) - 1), dist_reduce_fx = "sum")
+        self.add_state("TOT", default = torch.zeros(2, len(split) - 1), dist_reduce_fx = "sum")
+        
+        self.VAL: torch.Tensor
+        self.TOT: torch.Tensor
+        
+        self.match_distance = match_distance
+        self.split = split
+        self.split[-1] += 1e-5
+    
+    def update(self, atoms: list[Atoms]):
+        if isinstance(atoms, Atoms):
+            atoms = [atoms]
+
+            
+        for b, ats in enumerate(atoms):
+            h_pos = ats.positions[ats.symbols == "H"]
+            o_pos = ats.positions[ats.symbols == "O"]
+            
+            htree = KDTree(h_pos)
+            otree = KDTree(o_pos)
+            
+            o_neighbors = htree.query_ball_tree(otree, r = self.match_distance)
+            h_neighbors = otree.query_ball_tree(htree, r = self.match_distance)
+            
+            o_val = np.array([len(neigh) == 2 for neigh in h_neighbors])
+            h_val = np.array([len(neigh) == 1 for neigh in o_neighbors])
+            # print(o_val, h_val)
+            
+            for i, (low, high) in enumerate(zip(self.split[:-1], self.split[1:])):
+                mask = (o_pos[:, 2] >= low) & (o_pos[:, 2] < high)
+                
+                self.VAL[0, i] += o_val[mask].sum()
+                self.TOT[0, i] += mask.sum()
+                
+                mask = (h_pos[:, 2] >= low) & (h_pos[:, 2] < high)
+                self.VAL[1, i] += h_val[mask].sum()
+                self.TOT[1, i] += mask.sum()
+            
+            
+    def compute(self):
+        return self.VAL / self.TOT

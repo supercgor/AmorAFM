@@ -3,7 +3,6 @@ import numpy as np
 import torch
 
 from abc import abstractmethod
-from copy import deepcopy
 from functools import partial
 from itertools import chain
 from torch import nn, Tensor
@@ -715,6 +714,11 @@ class UNetND(nn.Module):
                  activation: str = 'relu',
                  use_gated_conv: bool = False,
                  gated_conv_heads: int = 16,
+                 cls_weight=None, 
+                 xy_weight=None, 
+                 z_weight=None, 
+                 pos_weight=None,
+                 **kwargs
                  ):
         super().__init__()
         self.in_size = np.asarray(in_size)
@@ -731,12 +735,16 @@ class UNetND(nn.Module):
         self.out_mult = out_mult
         self.conv_resample = conv_resample
         self.dtype = torch.float
+        
+        self.cls_weight = cls_weight or 1.0
+        self.xy_weight = xy_weight or 0.5
+        self.z_weight = z_weight or 0.5
+        
+        pos_weight = pos_weight or [5.0, 5.0]
 
-        self.cls_weight = 1.0
-        self.xy_weight = 0.5
-        self.z_weight = 0.5
-        self.register_buffer("pos_weight", torch.as_tensor([5.0, 5.0]))
-
+        self.register_buffer("pos_weight", torch.as_tensor(pos_weight))
+        self.pos_weight: torch.Tensor
+        
         _conv = partial(
             GatedConvNd, num_heads=gated_conv_heads) if use_gated_conv else conv_nd
 
@@ -909,17 +917,6 @@ class UNetND(nn.Module):
 
         return x
 
-    def compile_loss(self, cls_weight=None, xy_weight=None, z_weight=None, pos_weight=None):
-        if cls_weight is not None:
-            self.cls_weight = cls_weight
-        if xy_weight is not None:
-            self.xy_weight = xy_weight
-        if z_weight is not None:
-            self.z_weight = z_weight
-        if pos_weight is not None:
-            self.pos_weight[0].fill_(pos_weight[0])
-            self.pos_weight[1].fill_(pos_weight[1])
-
     def compute_loss(self, x: torch.Tensor, y):
         B, X, Y, Z, C = x.shape
         pred = x.reshape(B, X * Y * Z, 2, C // 2)
@@ -940,12 +937,10 @@ class UNetND(nn.Module):
         return total_loss, {'conf': loss_c, 'xy': loss_xy, 'z': loss_z}
 
     def inp_transform(self, x):
-        # B X Y Z C -> B C Z X Y
-        return x.permute(0, 4, 3, 1, 2)
+        return x
 
     def out_transform(self, x):
-        # B C Z X Y -> B X Y Z C
-        return x.permute(0, 3, 4, 2, 1).sigmoid()
+        return x.sigmoid()
 
 
 class CVAE3D(nn.Module):
@@ -964,6 +959,10 @@ class CVAE3D(nn.Module):
                  num_res_blocks=1,
                  use_gated_conv=False,
                  gated_conv_heads=16,
+                 conf_weight=None, 
+                 offset_weight=None, 
+                 vae_weight=None, 
+                 pos_weight=None
                  ):
         super().__init__()
         self.in_ch = in_channel
@@ -979,11 +978,13 @@ class CVAE3D(nn.Module):
         cond_channel_mult = channel_mult if cond_channel_mult is ... else cond_channel_mult
         cond_z_down = z_down if cond_z_down is None else cond_z_down
 
-        self.conf_weight = 1.0
-        self.offset_weight = 1.0
-        self.vae_weight = 1.0
+        self.conf_weight = conf_weight or 1.0
+        self.offset_weight = offset_weight or 1.0
+        self.vae_weight = vae_weight or 1.0
+        pos_weight = pos_weight or [1.0]
+        
         self.register_buffer(
-            'pos_weight', torch.tensor([1.0], dtype=torch.float))
+            'pos_weight', torch.tensor(pos_weight, dtype=torch.float))
 
         channels = [self.ch * ch_mult for ch_mult in channel_mult]
 
@@ -1092,16 +1093,6 @@ class CVAE3D(nn.Module):
         )
 
         self.dec.add_module('out', layer)
-
-    def compile_loss(self, conf_weight=None, offset_weight=None, vae_weight=None, pos_weight=None):
-        if conf_weight is not None:
-            self.conf_weight = conf_weight
-        if offset_weight is not None:
-            self.offset_weight = offset_weight
-        if vae_weight is not None:
-            self.vae_weight = vae_weight
-        if pos_weight is not None:
-            self.pos_weight.fill_(pos_weight)
 
     def forward(self, pred):
         pred = self.inp_transform(pred)
