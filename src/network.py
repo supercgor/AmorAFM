@@ -941,8 +941,8 @@ class UNetND(nn.Module):
         return x
 
     def out_transform(self, x):
-        # B C Z H W -> B W H Z C
-        return x.permute(0, 4, 3, 2, 1).sigmoid()
+        # B C Z W H -> B W H Z C
+        return x.permute(0, 3, 4, 2, 1).sigmoid()
 
 
 class CVAE3D(nn.Module):

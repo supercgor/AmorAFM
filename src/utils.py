@@ -6,8 +6,8 @@ import torch
 import warnings
 import pandas as pd
 
-from ase import Atoms, io
-from multiprocessing import Pool, cpu_count
+from ase import Atoms
+from multiprocessing import Pool
 from pathlib import Path
 from matplotlib import pyplot as plt
 from functools import partial
@@ -27,7 +27,7 @@ def get_logger(name, save_dir = None, level: int = logging.INFO):
     if save_dir is not None:
         handler.append(logging.FileHandler(Path(save_dir) / f"log.txt"))
     
-    logging.basicConfig(level=logging.INFO, handlers=handler)
+    logging.basicConfig(level=level, handlers=handler)
     
     return logging.getLogger(name)
 
@@ -43,6 +43,63 @@ def log_to_csv(path, **kwargs):
     else:
         df.to_csv(path, mode='a', header=False, index=False)
 
+
+def make_grid_centers(bbox_size, padding, rot, cell, mode = 'outer') -> np.ndarray:
+    assert not np.isclose(padding, 0.0), "Padding must be non-zero!"
+    bbox = np.array([[0.0,          0.0         ],
+                        [bbox_size[0], 0.0         ],
+                        [bbox_size[0], bbox_size[1]],
+                        [0.0,          bbox_size[1]]])
+    
+    bbox_center = [bbox_size[0] / 2, bbox_size[1] / 2]
+    
+    rot_bbox = (bbox - bbox_center) @ [[np.sin(rot), np.cos(rot)], [np.cos(rot), -np.sin(rot)]] # rotate anti-clockwise in (y, x) format
+    rot_bbox_size = np.max(rot_bbox, axis=0) - np.min(rot_bbox, axis=0)
+    
+    if mode == 'outer':
+        ref_boarder = bbox_size
+    elif mode == 'inner':
+        ref_boarder = rot_bbox_size
+    
+    N = np.clip(np.rint((np.diag(cell)[:2] - ref_boarder) / padding) + 1, 1, None).astype(np.int32)
+    
+    if N[0] == 1:
+        ipos = cell[0:1,0] / 2
+    else:
+        ipos = np.linspace(ref_boarder[0] / 2, cell[0,0] - ref_boarder[0] / 2, N[0])
+        
+    if N[1] == 1:
+        jpos = cell[1:2] / 2
+    else:
+        jpos = np.linspace(ref_boarder[1] / 2, cell[1,1] - ref_boarder[1] / 2, N[1])
+        
+    return np.stack(np.meshgrid(ipos, jpos, indexing="ij"), axis=-1).reshape(-1, 2) # (N, 2)
+    
+def make_grid_samples_points(grid_center, bbox_size, resolution, cell, rot = 0.0):
+    """
+    _summary_
+
+    Args:
+        grid_center (_type_): (2, ) # (X, Y)
+        bbox_size (_type_): (2, )   # (X, Y)
+        resolution (_type_): (2, )  # (X, Y)
+        cell (_type_): (3, 3)       # (X, Y, Z)
+        rot (float): in degree
+    """
+    rot = np.deg2rad(rot)
+    
+    gridx = np.linspace(0, bbox_size[0], resolution[0])
+    gridy = np.linspace(0, bbox_size[1], resolution[1])
+    
+    grid = np.stack(np.meshgrid(gridx, gridy, indexing = "ij"), axis = -1)
+    
+    bbox_center = [bbox_size[0] / 2, bbox_size[1] / 2]
+
+    grid = (grid - bbox_center) @ [[np.cos(rot), -np.sin(rot)], [np.sin(rot), np.cos(rot)]]
+    grid = (grid + grid_center) @ np.linalg.inv(cell[:2, :2])
+    grid = (grid - 0.5) * 2
+    grid = grid[..., (1, 0)]
+    return grid
 
 class ItLoader(Sampler):
     def __init__(self, dts, iters, shuffle = False):
@@ -335,34 +392,27 @@ def box2atom(box,
              cell=[25.0, 25.0, 16.0],
              threshold=0.5,
              cutoff: float | tuple[float, float] = 2.0,
-             mode='O',
              nms=True,
-             num_workers = 1
+             num_workers = 1,
+             order = ("O", "H"),
              ):
     
     if box.ndim > 4:
         if num_workers > 1:
-            fn = partial(box2atom, cell=cell, threshold=threshold, cutoff=cutoff, mode=mode, nms=nms)
+            fn = partial(box2atom, cell=cell, threshold=threshold, cutoff=cutoff, nms=nms, order = order)
             with Pool() as p:
                 return p.map(fn, box)
         else:
-            return list(map(lambda x: box2atom(x, cell=cell, threshold=threshold, cutoff=cutoff, mode=mode, nms=nms), box))
-            
-    elif mode == "O":
-        assert isinstance(cutoff, float), "In O mode, cutoff should be a float"
-        confidence, positions = box2orgvec(box, threshold, cutoff, cell, sort=True, nms=nms)
+            return list(map(lambda x: box2atom(x, cell=cell, threshold=threshold, cutoff=cutoff, nms=nms, order = order), box))
 
-        atoms = Atoms("O" * positions.shape[0], positions, cell=cell, pbc=False)
-        atoms.set_array('conf', confidence)
-    elif mode == 'OH':
-        assert isinstance(cutoff, tuple), "In OH mode, cutoff should be a tuple"
-        o_conf, o_pos = box2orgvec(box[..., :4], threshold, cutoff[0], cell, sort=True, nms=nms)
-        h_conf, h_pos = box2orgvec(box[..., 4:], threshold, cutoff[1], cell, sort=True, nms=nms)
-        atom1 = Atoms("O" * o_pos.shape[0], o_pos, cell=cell, pbc=False)
-        atom2 = Atoms("H" * h_pos.shape[0], h_pos, cell=cell, pbc=False)
-        atom1.set_array('conf', o_conf)
-        atom2.set_array('conf', h_conf)
-        atoms = atom1 + atom2
+    atoms = Atoms(cell=cell, pbc=False)
+    for i in range(box.shape[-1] // 4):
+        cut = cutoff[0] if isinstance(cutoff, tuple) else cutoff
+        conf, pos = box2orgvec(box[..., i * 4:i * 4 + 4], threshold, cut, cell, sort=True, nms=nms)
+        new_atoms = Atoms(order[i] * pos.shape[0], pos)
+        new_atoms.set_array('conf', conf)
+        atoms += new_atoms
+
     return atoms
 
 
@@ -558,28 +608,6 @@ def plot_preditions(save_path, afms, pred_atoms, atoms, name = None):
     plt.savefig(save_path)
     plt.close()
     
-    
-class view(object):
-    @staticmethod
-    def space_to_image(tensor: Tensor):
-        "C H W D -> (C D) 1 H W"
-        tensor = tensor.permute(0, 3, 1, 2).flatten(0, 1).unsqueeze(1)
-        image = make_grid(tensor, nrow=int(np.sqrt(tensor.shape[0])))
-        return image
-
-    @staticmethod
-    def afm_points_to_grid(afm: Tensor, grid: Tensor):
-        # afm: X Y Z 1, grid: X Y Z 8
-        grid = grid[..., (0, 4)].permute(2, 3, 1,
-                                         0).max(0,
-                                                keepdim=True).values  # 1 2 Y X
-        afm = afm.permute(2, 3, 1, 0)  # Z 1 Y X
-        grid = F.interpolate(grid,
-                             afm.shape[2:]).repeat([afm.shape[0], 1, 1, 1])
-        images = torch.cat([grid, afm], dim=1)  # Z 3 Y X
-        images = make_grid(images)
-        return images
-
 def write_water_data(atoms, 
                      fname, 
                      padding = [25, 25, 10], 
@@ -900,3 +928,81 @@ class ValidProbability(Metric):
             
     def compute(self):
         return self.VAL / self.TOT
+    
+
+def water_solver(atoms, r = 0.9572, deg = 104.52):
+    from scipy.spatial import KDTree
+    deg = np.deg2rad(deg)
+    occupy = set()
+    o_nei = {}
+    
+    o_mask = atoms.numbers == 8
+    o_l2g = o_mask.nonzero()[0]
+    
+    h_mask = atoms.numbers == 1
+    h_l2g = h_mask.nonzero()[0]
+    
+    tree = KDTree(atoms.positions[h_mask])
+    
+    results = tree.query_ball_point(atoms.positions[o_mask], r = 2.0, p =2)
+    
+    for o_l_i, res in enumerate(results):
+        o_g_i = o_l2g[o_l_i]
+        o_nei[o_g_i] = []
+        for h_l_i in res:
+            h_g_i = h_l2g[h_l_i]
+            if h_g_i not in occupy and len(o_nei[o_g_i]) < 2:
+                occupy.add(h_g_i)
+                o_nei[o_g_i].append(h_g_i)
+            else:
+                continue
+
+    h_atoms = []
+    for o, h in o_nei.items():
+        o_pos = atoms.positions[o]
+        if len(h) == 0:
+            h1 = o_pos + np.random.randn(3)
+            h2 = None
+        elif len(h) == 1:
+            h1 = atoms.positions[h[0]]
+            h2 = None
+        else:
+            h1 = atoms.positions[h[0]]
+            h2 = atoms.positions[h[1]]
+        
+        if h2 is None:
+            dh1 = h1 - o_pos
+            dh2 = np.random.randn(3)
+            
+            dh1 = dh1 / np.linalg.norm(dh1)
+            dh2 = dh2 - np.dot(dh1, dh2) * dh1
+            dh2 = dh2 / np.linalg.norm(dh2)
+            
+            dh2 = dh2 * np.sin(deg) + dh1 * np.cos(deg)
+            
+            h1 = o_pos + dh1 * r
+            h2 = o_pos + dh2 * r
+            
+        else:
+            dh1 = h1 - o_pos
+            dh2 = h2 - o_pos
+            
+            dh1 = dh1 / np.linalg.norm(dh1)
+            dh2 = dh2 / np.linalg.norm(dh2)
+            
+            dh1, dh2 = dh1 + dh2, dh1 - dh2
+            
+            dh1 = dh1 / np.linalg.norm(dh1)
+            dh2 = dh2 / np.linalg.norm(dh2)
+            
+            h1 = o_pos + (dh1 * np.cos(deg / 2) + dh2 * np.sin(deg / 2)) * r
+            h2 = o_pos + (dh1 * np.cos(deg / 2) - dh2 * np.sin(deg / 2)) * r
+        
+        h_atoms.append(h1)
+        h_atoms.append(h2)
+        
+    o_atoms = atoms[o_mask]
+    
+    h_atoms = Atoms("H" * len(h_atoms), positions = h_atoms)
+    
+    return o_atoms + h_atoms

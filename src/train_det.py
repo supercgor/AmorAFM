@@ -189,7 +189,6 @@ class Trainer():
                                  self.cfg.dataset.real_size,
                                  0.5,
                                  cutoff=(1.036, 0.7392),
-                                 mode='OH',
                                  nms=self.cfg.dataset.nms)
 
             self.atom_metrics.update(M=(out_atoms, atoms))
@@ -244,7 +243,6 @@ class Trainer():
                                  tuple(self.cfg.dataset.real_size),
                                  0.5,
                                  cutoff=(1.036, 0.7392),
-                                 mode='OH',
                                  nms=self.cfg.dataset.nms,
                                  num_workers=self.cfg.setting.num_workers)
 

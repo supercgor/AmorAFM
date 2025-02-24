@@ -1,4 +1,4 @@
-import os, time, shutil
+import os, sys, time, shutil
 import numpy as np
 import torch
 import utils
@@ -7,7 +7,7 @@ from argparse import ArgumentParser
 from ase.visualize import view
 from torch.utils.data import DataLoader
 from torchmetrics import MeanMetric
-from torchvision.utils import make_grid, save_image
+from torchvision.utils import make_grid
 from matplotlib import pyplot as plt
 from pathlib import Path
 from utils import box2atom
@@ -33,7 +33,7 @@ class Trainer():
         self.outdir = Path(self.cfg.setting.outdir)
         self.outdir.mkdir(parents=True, exist_ok=True)
         self.device = torch.device(self.cfg.setting.device)
-        self.log = utils.get_logger(self.outdir)
+        self.log = utils.get_logger("train", self.outdir)
         
         self.epoch = 0
         self.iters = 0
