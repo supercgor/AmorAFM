@@ -7,9 +7,9 @@ from ase import io, Atoms
 from PIL import Image
 from torch.utils.data import Dataset
 from typing import Literal
-from utils import vec2box
 from pathlib import Path
 
+from .utils import vec2box
 from .transform import blur_fn, cutout_fn, jitter_fn, noisy_fn, noise_label_fn, normalize_fn, pixel_shift_fn, random_remove_atoms_fn, z_layerwise_sampler, z_sampler
 
 class DetectDataset(Dataset):
@@ -20,7 +20,7 @@ class DetectDataset(Dataset):
                  image_split: None | list[int]                  = None,
                  image_size: tuple[int, int]                    = (100, 100),
                  real_size: tuple[float, ...]                   = (25.0, 25.0, 3.0),
-                 box_size: tuple[int, ...]                      = (32, 32, 4),
+                 box_size: tuple[int, int, int]                 = (32, 32, 4),
                  elements: tuple[int, ...]                      = (8, 1),
                  flipz: bool                                    = False,
                  z_align: str                                   = 'bottom',
@@ -107,7 +107,7 @@ class DetectDataset(Dataset):
             if self.random_top_remove_ratio > 0:
                 self.transform.append(random_remove_atoms_fn())
                 
-        if not self.transform:
+        if "afm" in self.mode:
             self.transform.append(normalize_fn())
     
     def sample(self, L):

@@ -937,10 +937,12 @@ class UNetND(nn.Module):
         return total_loss, {'conf': loss_c, 'xy': loss_xy, 'z': loss_z}
 
     def inp_transform(self, x):
+        # B C Z H W
         return x
 
     def out_transform(self, x):
-        return x.sigmoid()
+        # B C Z H W -> B W H Z C
+        return x.permute(0, 4, 3, 2, 1).sigmoid()
 
 
 class CVAE3D(nn.Module):

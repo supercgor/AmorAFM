@@ -9,16 +9,17 @@ import pandas as pd
 from ase import Atoms, io
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
+from matplotlib import pyplot as plt
 from functools import partial
 from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.distance import cdist
 from sklearn.cluster import DBSCAN
 from torch import nn, Tensor
+from torch.utils.data import Sampler
 from torch.nn import functional as F
 from torchmetrics import Metric
 from torchvision.utils import make_grid
-from typing import overload
 
 
 def get_logger(name, save_dir = None, level: int = logging.INFO):
@@ -296,21 +297,6 @@ def box2orgvec(box,
             
         return pd_conf, pd_pos
 
-    elif box.shape[-1] == 10:
-        pd_conf, pd_pos, pd_rotx, pd_roty = box2vec(box[..., 0], box[..., 1:4], box[..., 4:7], box[..., 7:10], threshold=threshold)
-        pd_rotz = np.cross(pd_rotx, pd_roty)
-        pd_R = np.stack([pd_rotx, pd_roty, pd_rotz], axis=-2)
-        if sort:
-            pd_conf_order = pd_conf.argsort()[::-1]
-            pd_pos = pd_pos[pd_conf_order]
-            pd_R = pd_R[pd_conf_order]
-        if nms:
-            pd_nms_mask = masknms(pd_pos, cutoff)
-            pd_conf = pd_conf[pd_nms_mask]
-            pd_pos = pd_pos[pd_nms_mask]
-            pd_R = pd_R[pd_nms_mask]
-        return pd_conf, pd_pos, pd_R
-
     else:
         raise ValueError(
             f"Require the last dimension of the box to be 4 or 10, but got {box.shape[-1]}"
@@ -364,14 +350,14 @@ def box2atom(box,
             
     elif mode == "O":
         assert isinstance(cutoff, float), "In O mode, cutoff should be a float"
-        confidence, positions, *_ = box2orgvec(box, threshold, cutoff, cell, sort=True, nms=nms)
+        confidence, positions = box2orgvec(box, threshold, cutoff, cell, sort=True, nms=nms)
 
         atoms = Atoms("O" * positions.shape[0], positions, cell=cell, pbc=False)
         atoms.set_array('conf', confidence)
     elif mode == 'OH':
         assert isinstance(cutoff, tuple), "In OH mode, cutoff should be a tuple"
-        o_conf, o_pos, *_ = box2orgvec(box[..., :4], threshold, cutoff[0], cell, sort=True, nms=nms)
-        h_conf, h_pos, *_ = box2orgvec(box[..., 4:], threshold, cutoff[1], cell, sort=True, nms=nms)
+        o_conf, o_pos = box2orgvec(box[..., :4], threshold, cutoff[0], cell, sort=True, nms=nms)
+        h_conf, h_pos = box2orgvec(box[..., 4:], threshold, cutoff[1], cell, sort=True, nms=nms)
         atom1 = Atoms("O" * o_pos.shape[0], o_pos, cell=cell, pbc=False)
         atom2 = Atoms("H" * h_pos.shape[0], h_pos, cell=cell, pbc=False)
         atom1.set_array('conf', o_conf)
@@ -506,45 +492,7 @@ def replicate(points: np.ndarray, times: list[int], offset: np.ndarray) -> np.nd
     return points
 
 
-def grid_to_water_molecule(grids,
-                           cell=[25.0, 25.0, 16.0],
-                           threshold=0.5,
-                           cutoff=2.0,
-                           flip_axis=[False, False, True]) -> Atoms:
-    """
-    Convert grids to atoms formats.
-
-    Args:
-        grids (Tensor | ndarray): shape: (X, Y, Z, C)
-
-    Returns:
-        atoms (ase.Atoms)
-    """
-    conf, pos, rotation = box2orgvec(grids,
-                                     threshold=threshold,
-                                     cutoff=cutoff,
-                                     real_size=cell,
-                                     sort=True,
-                                     nms=True)
-    rotation = rotation.view(-1, 9)[:, :6]
-
-    atoms_pos = decodewater(np.concatenate([pos, rotation],
-                                           axis=-1)).reshape(-1, 3)
-    atoms_pos = atoms_pos * np.where(flip_axis, -1, 1) + np.where(
-        flip_axis, cell, 0)
-
-    atoms_types = ["O", "H", "H"] * len(pos)
-    atoms_conf = np.repeat(conf, 3)
-    atoms = Atoms(atoms_types,
-                  atoms_pos,
-                  tags=atoms_conf,
-                  cell=cell,
-                  pbc=False)
-
-    return atoms
-
-
-def combine_atoms(atom_list: list[Atoms], eps=0.5):
+def combine_atoms(atom_list, eps=0.5):
     all_atoms = atom_list[0]
     for atoms in atom_list[1:]:
         all_atoms = all_atoms + atoms
@@ -576,6 +524,41 @@ def combine_atoms(atom_list: list[Atoms], eps=0.5):
     return out
 
 
+def plot_preditions(save_path, afms, pred_atoms, atoms, name = None):
+    # afms: C Z H W
+    cell = atoms.cell.array
+    X, Y, Z = np.diag(cell)
+    
+    tgt_Opos = atoms[atoms.numbers == 8].positions
+    tgt_Hpos = atoms[atoms.numbers == 1].positions
+    
+    pred_positions = pred_atoms.positions
+    pred_numbers = pred_atoms.numbers
+    pred_color = np.where(pred_numbers == 8, 'b', 'lightgray')
+    
+    order = np.argsort(pred_positions[:, 2])
+    pred_positions = pred_positions[order]
+    pred_numbers = pred_numbers[order]
+    
+    afms = np.rot90(afms)
+    
+    fig = plt.figure(figsize=(12, 4))
+    if name is not None:
+        fig.suptitle(name)
+    axs = fig.subplots(1, 3, sharey=True)
+
+    for i, idx in enumerate([0, 4, 7]):
+        axs[i].imshow(afms[idx].transpose((1, 2, 0)), extent=[0, X, 0, Y])
+        axs[i].scatter(tgt_Opos[:, 0], tgt_Opos[:, 1], c='r', marker='o')
+        axs[i].scatter(tgt_Hpos[:, 0], tgt_Hpos[:, 1], c='w', marker='o')
+        axs[i].scatter(pred_positions[:, 0], pred_positions[:, 1], c = pred_color, marker='x')
+        axs[i].set_xlim([0, X])
+        axs[i].set_ylim([0, Y])
+    
+    plt.savefig(save_path)
+    plt.close()
+    
+    
 class view(object):
     @staticmethod
     def space_to_image(tensor: Tensor):
@@ -727,6 +710,9 @@ class ConfusionMatrix(Metric):
         self.add_state("matrix", default = torch.zeros((len(count_types), len(split) - 1, 7), dtype = torch.float), dist_reduce_fx = "sum")
         self.add_state("total", default = torch.tensor([0]), dist_reduce_fx = "sum")
         
+        self.matrix: torch.Tensor
+        self.total: torch.Tensor
+        
         self.count_types = count_types
         self.match_distance = match_distance
         self.split = split
@@ -740,8 +726,8 @@ class ConfusionMatrix(Metric):
             
         for b, (pred, targ) in enumerate(zip(preds, targs)):
             for t, count_type in enumerate(self.count_types):
-                pre = pred[pred.symbols == count_type].positions
-                tar = targ[targ.symbols == count_type].positions
+                pre = pred[pred.symbols == count_type].positions # type: ignore
+                tar = targ[targ.symbols == count_type].positions # type: ignore
                 
                 pd_match_ids, tg_match_ids = argmatch(pre, tar, self.match_distance)
                 
@@ -786,6 +772,9 @@ class MeanAbsoluteDistance(Metric):
         self.add_state("RDE", default = torch.zeros(len(count_types), len(split) - 1), dist_reduce_fx = "sum")
         self.add_state("TOT", default = torch.zeros(len(count_types), len(split) - 1), dist_reduce_fx = "sum")
         
+        self.RDE: torch.Tensor
+        self.TOT: torch.Tensor
+        
         self.count_types = count_types
         self.match_distance = match_distance
         self.split = split
@@ -799,10 +788,10 @@ class MeanAbsoluteDistance(Metric):
             
         for b, (pred, targ) in enumerate(zip(preds, targs)):
             for t, count_type in enumerate(self.count_types):
-                pre = pred[pred.symbols == count_type].positions
-                tar = targ[targ.symbols == count_type].positions
+                pre = pred[pred.symbols == count_type].positions # type: ignore
+                tar = targ[targ.symbols == count_type].positions # type: ignore
                 
-                pd_match_ids, tg_match_ids = lib.argmatch(pre, tar, self.match_distance)
+                pd_match_ids, tg_match_ids = argmatch(pre, tar, self.match_distance)
                 
                 match_pd_pos = pre[pd_match_ids] # N 3
                 match_tg_pos = tar[tg_match_ids] # N 3
@@ -844,8 +833,8 @@ class MeanSquareDistance(Metric):
             
         for b, (pred, targ) in enumerate(zip(preds, targs)):
             for t, count_type in enumerate(self.count_types):
-                pre = pred[pred.symbols == count_type].positions
-                tar = targ[targ.symbols == count_type].positions
+                pre = pred[pred.symbols == count_type].positions # type: ignore
+                tar = targ[targ.symbols == count_type].positions # type: ignore
                 
                 pd_match_ids, tg_match_ids = argmatch(pre, tar, self.match_distance)
                 

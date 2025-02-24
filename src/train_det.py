@@ -9,13 +9,13 @@ from torch.utils.data import DataLoader
 from torchmetrics import MeanMetric
 from torchvision.utils import save_image
 from matplotlib import pyplot as plt
-from network import UNetND, CycleGAN
-from dataset import DetectDataset
-from utils import box2atom, view
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from configs.detect import DetectConfig as Config
+from src.network import UNetND, CycleGAN
+from src.dataset import DetectDataset
+from src.utils import box2atom, plot_preditions
 
 def get_parser():
     parser = ArgumentParser()
@@ -32,6 +32,7 @@ class Trainer():
         self.outdir.mkdir(parents=True, exist_ok=True)
         self.log = utils.get_logger("train", self.outdir)
         self.iters = 0
+        self.epoch = 0
 
         self.model = UNetND(**self.cfg.model.params.__dict__).to(self.device)
       
@@ -50,9 +51,9 @@ class Trainer():
                                        image_size=cfg.dataset.image_size,
                                        image_split=cfg.dataset.image_split,
                                        real_size=self.cfg.dataset.real_size,
-                                       box_size=(32, 32, 4),
+                                       box_size=self.cfg.dataset.box_size,
                                        random_transform=True,
-                                       random_noisy=0.3,
+                                       random_noisy=0.1,
                                        random_cutout=True,
                                        random_jitter=True,
                                        random_blur=True,
@@ -66,9 +67,9 @@ class Trainer():
                                       image_size=self.cfg.dataset.image_size,
                                       image_split=self.cfg.dataset.image_split,
                                       real_size=self.cfg.dataset.real_size,
-                                      box_size=(32, 32, 4),
+                                      box_size=self.cfg.dataset.box_size,
                                       random_transform=True,
-                                      random_noisy=0.3,
+                                      random_noisy=0.1,
                                       random_cutout=True,
                                       random_jitter=True,
                                       random_blur=True,
@@ -77,8 +78,8 @@ class Trainer():
         collate_fn = self.train_dts.collate_fn
 
         if self.cfg.setting.debug:
-            self.train_dts = torch.utils.data.Subset(self.train_dts, range(10))
-            self.test_dts = torch.utils.data.Subset(self.test_dts, range(10))
+            self.train_dts = torch.utils.data.Subset(self.train_dts, range(100))
+            self.test_dts = torch.utils.data.Subset(self.test_dts, range(20))
         
         self.train_dtl = DataLoader(self.train_dts,
                                     cfg.setting.batch_size,
@@ -104,9 +105,10 @@ class Trainer():
 
         self.atom_metrics = utils.MetricCollection(
             M=utils.ConfusionMatrix(
-                real_size=tuple(cfg.dataset.real_size),
+                real_size=cfg.dataset.real_size,
                 split=self.cfg.dataset.split,
-                match_distance=1.0)).to(self.device)
+                match_distance=1.0)
+        ).to(self.device)
 
         self.grid_metrics = utils.MetricCollection(
             loss=MeanMetric(),
@@ -123,14 +125,13 @@ class Trainer():
 
     def fit(self):
         for epoch in range(1, self.cfg.setting.epoch + 1):
+            self.epoch = epoch
             self.log.info(f"Start training epoch: {epoch}...")
             epoch_start_time = time.time()
-            gm = self.train_one_epoch(epoch,
-                                      log_every=self.cfg.setting.log_every)
-            logstr = f"Train Summary: Epoch: {epoch:2d}, Used time: {(time.time() - epoch_start_time)/60:4.1f} mins, last loss: {gm['loss']:.2e}"
+            gm = self.train_one_epoch()
+            self.log.info(f"Train Summary: Epoch: {epoch:2d}, Used time: {(time.time() - epoch_start_time)/60:4.1f} mins, last loss: {gm['loss']:.2e}")
 
-            gm, atom_metric = self.test_one_epoch(
-                epoch, log_every=self.cfg.setting.log_every)
+            gm, atom_metric = self.test_one_epoch()
             loss = gm['loss']
             M = atom_metric['M']
 
@@ -138,21 +139,29 @@ class Trainer():
                              total=self.iters,
                              epoch=epoch,
                              **gm)
-
-            logstr = f"\n============= Summary Test | Epoch {epoch:2d} ================\nloss: {loss:.2e} | used time: {(time.time() - epoch_start_time)/60:4.1f} mins | {'Model saved' if loss < self.best else 'Model not saved'}"
-            logstr += f"\n=================   Element - 'H2O'   ================="
-            logstr += f"\n(Overall)  AP: {M[:, :,3].mean():.2f} | AR: {M[:, :,4].mean():.2f} | ACC: {M[:, :,5].mean():.2f} | SUC: {M[:, :,6].mean():.2f} | F1: {(M[:, :,3] * M[:, :,4] * 2 / (M[:, :,3] + M[:, :,4])).mean():.2f}"
+            
+            self.log.info(f"Test Summary, Epoch {self.epoch:2d}")
+            self.log.info(f"Loss: {loss:.2e}, Used time: {(time.time() - epoch_start_time)/60:4.1f} mins")
+            self.log.info(f"{'Model saved' if loss < self.best else 'Model not saved'}")
+            self.log.info(f"Overall metrics")
+            self.log.info(f"AP: {M[:, :, 3].mean():10.2f}, AR: {M[:, :,4].mean():10.2f}, ACC: {M[:, :,5].mean():9.2f}")
+            self.log.info(f"TP: {M[:, :, 0].mean():10.0f}, FP: {M[:, :, 1].mean():10.0f}, FN: {M[:, :, 2].mean():10.0f}")
+            self.log.info(f"SUC: {M[:, :,6].mean():9.2f}, F1: {(M[:, :,3] * M[:, :,4] * 2 / (M[:, :,3] + M[:, :,4])).mean():10.2f}")
             for elem in range(M.shape[0]):
-                logstr += f"\n({'O' if elem == 0 else 'H'}) AP: {M[elem, :,3].mean():.2f} | AR: {M[elem, :,4].mean():.2f} | ACC: {M[elem, :,5].mean():.2f} | SUC: {M[elem, :,6].mean():.2f} | F1: {(M[elem, :,3] * M[elem, :,4] * 2 / (M[elem, :,3] + M[elem, :,4])).mean():.2f}"
-                for i, (low, high) in enumerate(
-                        zip(self.cfg.dataset.split[:-1],
-                            self.cfg.dataset.split[1:])):
-                    logstr += f"\n({low:.1f}-{high:.1f}A) AP: {M[elem,i,3]:.2f} | AR: {M[elem,i,4]:.2f} | ACC: {M[elem,i,5]:.2f} | SUC: {M[elem,i,6]:.2f}\nTP: {M[elem,i,0]:10.0f} | FP: {M[elem,i,1]:10.0f} | FN: {M[elem,i,2]:10.0f}"
+                elem_name = "O" if elem == 0 else "H"
+                self.log.info(f"{elem_name} metrics")
+                self.log.info(f"AP: {M[elem, :,3].mean():10.2f}, AR: {M[elem, :,4].mean():10.2f}, ACC: {M[elem, :,5].mean():9.2f}")
+                self.log.info(f"TP: {M[elem, :,0].mean():10.0f}, FP: {M[elem, :, 1].mean():10.0f}, FN: {M[elem, :,2].mean():10.0f}")
+                self.log.info(f"SUC: {M[elem, :,6].mean():9.2f}, F1: {(M[elem, :,3] * M[elem, :,4] * 2 / (M[elem, :,3] + M[elem, :,4])).mean():10.2f}")
+                for i in range(len(self.cfg.dataset.split) - 1):
+                    low, high = self.cfg.dataset.split[i: i+2]
+                    self.log.info(f"({low:.1f}-{high:.1f}A) AP: {M[elem,i,3]:10.2f}, AR: {M[elem,i,4]:10.2f}, ACC: {M[elem,i,5]:9.2f}")
+                    self.log.info(f"({low:.1f}-{high:.1f}A) TP: {M[elem,i,0]:10.0f}, FP: {M[elem,i,1]:10.0f}, FN: {M[elem,i,2]:10.0f}")
+                    self.log.info(f"({low:.1f}-{high:.1f}A) SUC: {M[elem,i,6]:9.2f}, F1: {(M[elem, i,3] * M[elem, i,4] * 2 / (M[elem, i,3] + M[elem, i,4])).mean():10.2f}")
 
-            self.save_model(epoch, loss)
-            self.log.info(logstr)
+            self.save_model(loss)
 
-    def train_one_epoch(self, epoch, log_every: int = 100):
+    def train_one_epoch(self):
         self.grid_metrics.reset()
         self.atom_metrics.reset()
         self.model.train()
@@ -177,7 +186,7 @@ class Trainer():
                                                   error_if_nonfinite=False)
             self.opt.step()
             out_atoms = box2atom(preds.detach().cpu().numpy(),
-                                 tuple(self.cfg.dataset.real_size),
+                                 self.cfg.dataset.real_size,
                                  0.5,
                                  cutoff=(1.036, 0.7392),
                                  mode='OH',
@@ -192,50 +201,30 @@ class Trainer():
 
             self.iters += 1
 
-            if i % log_every == 0:
+            if i % self.cfg.setting.log_every == 0:
+                savedir = self.outdir / f"Epoch{self.epoch:02d}"
+                savedir.mkdir(exist_ok=True)
                 with torch.no_grad():
-                    plot_inp, plot_targ, plot_pred, plot_atoms = inps[0], targs[0], preds[0], out_atoms[0]
-                    images = view.afm_points_to_grid(plot_inp, plot_pred)
-                    save_image(images, self.outdir / "test.png")
-                    save_image(images[0], self.outdir / "omap.png")
-                    save_image(images[1], self.outdir / "pmap.png")
-                    # print(preds[0,...,0].max(), targs[0,...,0].max())
-                    fig = plt.figure(figsize=(10, 10))
-                    ax = fig.add_subplot(111)
-                    ax.imshow(inps[0, :, :, 3].detach().cpu().numpy().transpose(1, 0, 2),
-                              origin='lower',
-                              cmap='gray')
-                    scale_x = inps.shape[1] / self.cfg.dataset.real_size[0]
-                    scale_y = inps.shape[2] / self.cfg.dataset.real_size[1]
+                    plot_preditions(savedir / f"{i:06d}.png", inps[0].detach().cpu().numpy(), out_atoms[0], atoms[0], name = filenames[0])
                     
-                    ax.scatter(out_atoms[0].get_positions()[:, 0] * scale_x, # type: ignore
-                               out_atoms[0].get_positions()[:, 1] * scale_y, # type: ignore
-                               c='r')
-                    ax.scatter(atoms[0].positions[:, 0] * scale_x,
-                               atoms[0].positions[:, 1] * scale_y,
-                               c='b')
-                    fig.savefig(self.outdir / "atom.png")
-                    plt.close(fig)
+                    
                     self.log.info(
-                        f"E[{epoch:2d}/{self.cfg.setting.epoch}], I[{i:5d}/{len(self.train_dtl):5d}], L{loss:.2e}, G{grad:.2e}"
+                        f"E[{self.epoch:2d}/{self.cfg.setting.epoch}], I[{i:5d}/{len(self.train_dtl):5d}], L{loss:.2e}, G{grad:.2e}"
                     )
                     
                     utils.log_to_csv(self.outdir / "train.csv",
                                      total=self.iters,
-                                     epoch=epoch,
+                                     epoch=self.epoch,
                                      iter=i,
                                      **self.grid_metrics.compute())
                 self.grid_metrics.reset()
-
-            if self.cfg.setting.debug and i > 10:
-                break
 
         self.scheduler.step()
 
         return self.grid_metrics.compute()
 
     @torch.no_grad()
-    def test_one_epoch(self, epoch, log_every: int = 100):
+    def test_one_epoch(self):
         self.grid_metrics.reset()
         self.atom_metrics.reset()
         self.model.eval()
@@ -265,13 +254,10 @@ class Trainer():
                                      xy=loss_values['xy'],
                                      z=loss_values['z'])
 
-            if i % log_every == 0:
+            if i % self.cfg.setting.log_every == 0:
                 self.log.info(
-                    f"E[{epoch:2d}/{self.cfg.setting.epoch}], I[{i:5d}/{len(self.test_dtl):5d}], L{loss:.2e}"
+                    f"E[{self.epoch:2d}/{self.cfg.setting.epoch}], I[{i:5d}/{len(self.test_dtl):5d}], L{loss:.2e}"
                 )
-
-            if self.cfg.setting.debug and i > 10:
-                break
 
         return self.grid_metrics.compute(), self.atom_metrics.compute()
 
@@ -311,11 +297,11 @@ class Trainer():
             self.log.info(f"Tune model parameters: {sum([p.numel() for p in self.tune_model.parameters()])}")
         
     
-    def save_model(self, epoch, metric):
+    def save_model(self, metric):
         # save model
         if metric is None or metric < self.best:
             self.best = metric
-            path = self.outdir / f"unetv3_CP{epoch:02d}_L{metric:.4f}.pkl"
+            path = self.outdir / f"DETECT_E{self.epoch:02d}_L{metric:.3e}.pkl"
             if len(self.save_paths) >= self.cfg.setting.max_save:
                 os.remove(self.save_paths.pop(0))
             torch.save(self.model.state_dict(), path)

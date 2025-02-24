@@ -67,49 +67,50 @@ class TuneModelParams:
 
 @dataclass
 class TuneModel:
-    name: str = "CycleGAN"
-    checkpoint: str = ""
+    name: str               = "CycleGAN"
+    checkpoint: str         = ""
     params: TuneModelParams = field(default_factory=TuneModelParams)
 
 
 @dataclass
 class Setting:
-    epoch: int = 30
-    batch_size: int = 8
-    num_workers: int = 6
-    pin_memory: bool = True
-    log_every: int = 100
-    max_save: int = 5
-    device: str = "cuda"
-    outdir: str = "outputs/"
-    debug: bool = False
+    epoch: int          = 30
+    batch_size: int     = 8
+    num_workers: int    = 6
+    pin_memory: bool    = True
+    log_every: int      = 100
+    max_save: int       = 5
+    device: str         = "cuda"
+    outdir: str         = "outputs/"
+    debug: bool         = False
 
 
 @dataclass
 class Optimizer:
-    lr: float = 1.0e-4
+    lr: float           = 1.0e-4
     weight_decay: float = 5.0e-3
-    clip_grad: float = 5.0
+    clip_grad: float    = 5.0
 
 
 @dataclass
 class Dataset:
-    train_path: str = "dataset/.detect-train"
-    test_path: str = "dataset/.detect-test"
-    num_images: list[int] = field(default_factory=lambda: [4, 3, 3])
-    image_size: tuple[int, int] = (100, 100)
-    image_split: list[int] = field(default_factory=lambda: [10, 18])
-    real_size: tuple[float, float, float] = (25.0, 25.0, 3.0)
-    ion_type: list[str] = field(default_factory=lambda: ['O', 'H'])
-    split: list[float] = field(default_factory=lambda: [0.0, 1.5, 3.0])
-    nms: bool = True
+    train_path: str                         = "dataset/.detect-train"
+    test_path: str                          = "dataset/.detect-test"
+    num_images: list[int]                   = field(default_factory=lambda: [4, 3, 3])
+    image_size: tuple[int, int]             = (100, 100)
+    image_split: list[int]                  = field(default_factory=lambda: [10, 18])
+    real_size: tuple[float, float, float]   = (25.0, 25.0, 3.0)
+    box_size: tuple[int, int, int]          = (32, 32, 4)
+    ion_type: list[str]                     = field(default_factory=lambda: ['O', 'H'])
+    split: list[float]                      = field(default_factory=lambda: [0.0, 1.5, 3.0])
+    nms: bool                               = True
 
 
 @dataclass
 class DetectConfig:
-    model: Model = field(default_factory=Model)
-    tune_model: TuneModel = field(default_factory=TuneModel)
-    setting: Setting = field(default_factory=Setting)
-    optimizer: Optimizer = field(default_factory=Optimizer)
-    scheduler: Scheduler = field(default_factory=Scheduler)
-    dataset: Dataset = field(default_factory=Dataset)
+    model: Model            = field(default_factory=Model)
+    tune_model: TuneModel   = field(default_factory=TuneModel)
+    setting: Setting        = field(default_factory=Setting)
+    optimizer: Optimizer    = field(default_factory=Optimizer)
+    scheduler: Scheduler    = field(default_factory=Scheduler)
+    dataset: Dataset        = field(default_factory=Dataset)

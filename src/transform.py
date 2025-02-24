@@ -37,11 +37,16 @@ OptArray = TypeVar('NDArray')
 OptAtoms = TypeVar('Atoms')
 type transform_fn = Callable[[OptArray, OptAtoms], tuple[OptArray, OptAtoms]]
 
-def noisy_fn(intensity: float | bool = 0.03) -> transform_fn:
-    if isinstance(intensity, bool):
-        intensity = 0.03
+def noisy_fn(max_intensity: float | bool = 0.03) -> transform_fn:
+    if isinstance(max_intensity, bool):
+        max_intensity = 0.03
+        
     def _fn(imgs, atoms):
-        return imgs + np.random.randn(*imgs.shape) * intensity, atoms
+        intensity = random.uniform(0, max_intensity)
+        if random.randbytes(1):
+            return imgs + np.random.randn(*imgs.shape) * intensity, atoms
+        else:
+            return imgs + np.random.uniform(-intensity, intensity, imgs.shape), atoms
     return _fn
 
 def flip_fn(ratio: tuple[float, float] = (0.5, 0.5)) -> transform_fn:
@@ -141,5 +146,4 @@ def random_remove_atoms_fn(cutoff: float = 12.0, ratio = 0.3):
         keep_ind = np.random.permutation(len(atoms_top))[:len(atoms_top) - remove_num]
         atoms_top = atoms_top[keep_ind]
         return imgs, atoms_top + atoms_bot
-    
     return _fn

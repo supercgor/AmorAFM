@@ -12,7 +12,8 @@ from torchmetrics import MeanMetric
 from torchmetrics.image import FrechetInceptionDistance as FID
 from matplotlib import pyplot as plt
 from pathlib import Path
-from dataset import ItLoader, DetectDataset
+from utils import ItLoader
+from dataset import DetectDataset
 from network import CycleGAN
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
