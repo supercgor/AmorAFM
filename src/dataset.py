@@ -16,7 +16,7 @@ from .transform import blur_fn, cutout_fn, jitter_fn, noisy_fn, noise_label_fn, 
 
 class DetectDataset(Dataset):
     def __init__(self, 
-                 fname: str,
+                 fname: str | Path,
                  mode: Literal['afm+label', 'afm', 'label', 'afm+crop'] = 'afm+label',
                  num_images: int | list[int]                    = 10,
                  image_split: None | list[int]                  = None,
@@ -148,8 +148,8 @@ class DetectDataset(Dataset):
         idxs = self.sample(len(files))
         afms = []
         grid_center = self.grids_centers[idx]
-        grids = make_grid_samples_points(grid_center = grid_center, 
-                                         bbox_size = self.real_size[:2], 
+        grids = make_grid_samples_points(grid_center = grid_center[::-1], 
+                                         bbox_size = self.real_size, 
                                          resolution = self.image_size, 
                                          cell = self.cell_info[1:], 
                                          rot = 270)
@@ -180,8 +180,8 @@ class DetectDataset(Dataset):
         atoms_pos = []
         for atoms, grid_center in zip(results, self.grids_centers):
             pos = atoms.get_positions()
-            offset_x = grid_center[1] - self.real_size[0] / 2
-            offset_y = self.cell_info[2,1] - grid_center[0] - self.real_size[1] / 2
+            offset_x = grid_center[0] - self.real_size[0] / 2
+            offset_y = self.cell_info[2,1] - grid_center[1] - self.real_size[1] / 2
             pos[:, :2] += [offset_x, offset_y]
             
             atoms_types.append(atoms.numbers)
@@ -258,7 +258,7 @@ class DetectDataset(Dataset):
                 while not f.readline().startswith("L_exp"):
                     pass
                 cell_disp = np.zeros((3,))
-                cell = np.diag(np.array(list(map(lambda x: 10 * float(x), f.readline().split())) + [20.0]))
+                cell = np.diag(np.array(list(map(lambda x: 10 * float(x), f.readline().split()))[::-1] + [20.0]))
                 
             return np.concatenate([[cell_disp], cell], axis = 0) # shape: (4, 3)
         

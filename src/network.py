@@ -15,12 +15,12 @@ def conv_nd(dims,
             in_channels,
             out_channels,
             kernel_size,
-            stride: int | tuple[int, ...] = 1,
-            padding=0,
-            dilation=1,
-            groups=1,
-            bias=True,
-            padding_mode="zeros",
+            stride = 1,
+            padding = 0,
+            dilation = 1,
+            groups = 1,
+            bias = True,
+            padding_mode = "zeros",
             *args,
             **kwargs):
     """
@@ -122,10 +122,11 @@ def avg_adt_pool_nd(dims, *args, **kwargs):
 
 
 def normalization(channels):
-    if channels < 32:
-        return nn.GroupNorm(min(1, channels // 2), channels)
+    return nn.GroupNorm(min(32, channels), channels)
+    # if channels < 32:
+    #     return nn.GroupNorm(min(1, channels // 2), channels)
 
-    return nn.GroupNorm(32, channels)
+    # return nn.GroupNorm(32, channels)
 
 
 def timestep_embedding(timesteps, dim, max_period=10000):
@@ -947,9 +948,9 @@ class UNetND(nn.Module):
 
 class CVAE3D(nn.Module):
     def __init__(self,
-                 in_channel,
-                 model_channel,
-                 latent_channel=8,
+                 in_channels,
+                 model_channels,
+                 latent_channels=8,
                  in_size=(12, 25, 25),  # Z, X, Y
                  channel_mult: tuple[int, ...] = (1, 2, 4, 4),
                  z_down: tuple[int, ...] = (1, 2),
@@ -967,9 +968,9 @@ class CVAE3D(nn.Module):
                  pos_weight=None
                  ):
         super().__init__()
-        self.in_ch = in_channel
-        self.ch = model_channel
-        self.z_ch = model_channel if latent_channel is ... else latent_channel
+        self.in_ch = in_channels
+        self.ch = model_channels
+        self.z_ch = model_channels if latent_channels is ... else latent_channels
         self.dp = dropout
         self.in_size = np.asarray(in_size)
         self.cond_in_size = in_size if cond_in_size is None else np.asarray(
@@ -990,110 +991,103 @@ class CVAE3D(nn.Module):
 
         channels = [self.ch * ch_mult for ch_mult in channel_mult]
 
+        _conv = partial(GatedConvNd, num_heads = gated_conv_heads) if use_gated_conv else conv_nd
         self.in_conv = conv_nd(3, self.in_ch, self.ch, 1)
-
+        
         in_sizes = [in_size]
         cond_in_sizes = [cond_in_size]
-
+        
         for i in range(len(channel_mult) - 1):
             if 2 ** i in z_down:
-                in_size = np.ceil(in_size / 2).astype(int)
+                in_size = np.ceil(in_size / 2).astype(int)    
             else:
                 in_size = np.ceil(in_size / [1, 2, 2]).astype(int)
             if 2 ** i in cond_z_down:
                 cond_in_size = np.ceil(cond_in_size / 2).astype(int)
             else:
                 cond_in_size = np.ceil(cond_in_size / [1, 2, 2]).astype(int)
-
+                
             in_sizes.append(in_size)
             cond_in_sizes.append(cond_in_size)
-
+        
         self.vae_enc = TimestepEmbedSequential()
         self.cond_enc = TimestepEmbedSequential()
-
+        
         for i in range(len(channels)):
             ds = 2 ** i
             layer = TimestepEmbedSequential()
             clayer = TimestepEmbedSequential()
-
+            
             for j in range(num_res_blocks):
-                layer.add_module(f'res{j}',  ResBlock(channels[i], None,
-                                                      out_channels=channels[i],
-                                                      dropout=self.dp,
-                                                      dims=3,
-                                                      padding_mode='zeros',
-                                                      use_gated_conv=use_gated_conv,
+                layer.add_module(f'res{j}',  ResBlock(channels[i], None, 
+                                                      out_channels=channels[i], 
+                                                      dropout = self.dp, 
+                                                      dims = 3, 
+                                                      padding_mode='zeros', 
+                                                      use_gated_conv = use_gated_conv,
                                                       gated_conv_heads=gated_conv_heads
                                                       ))
-
-                clayer.add_module(f'res{j}', ResBlock(channels[i], None,
-                                                      out_channels=channels[i],
-                                                      dropout=self.dp,
-                                                      dims=3,
-                                                      padding_mode='zeros',
-                                                      use_gated_conv=use_gated_conv,
+                
+                clayer.add_module(f'res{j}', ResBlock(channels[i], None, 
+                                                      out_channels=channels[i], 
+                                                      dropout = self.dp, 
+                                                      dims = 3, 
+                                                      padding_mode='zeros', 
+                                                      use_gated_conv = use_gated_conv,
                                                       gated_conv_heads=gated_conv_heads
                                                       ))
                 if ds in attention_resolutions:
-                    layer.add_module(f'att{j}', AttentionBlock(
-                        channels[i], num_heads=8))
-                    clayer.add_module(f'att{j}', AttentionBlock(
-                        channels[i], num_heads=8))
-
+                    layer.add_module(f'att{j}', AttentionBlock(channels[i], num_heads = 8))
+                    clayer.add_module(f'att{j}', AttentionBlock(channels[i], num_heads = 8))
+            
             if i < len(channels) - 1:
-                layer.add_module(f'down',  Downsample(
-                    channels[i], True, 3, channels[i + 1], z_down=ds in z_down))
-                clayer.add_module(f'down', Downsample(
-                    channels[i], True, 3, channels[i + 1], z_down=ds in cond_z_down))
+                layer.add_module(f'down',  Downsample(channels[i], True, 3, channels[i + 1], z_down = ds in z_down))
+                clayer.add_module(f'down', Downsample(channels[i], True, 3, channels[i + 1], z_down = ds in cond_z_down))
             else:
                 layer.add_module(f"pool", avg_adt_pool_nd(3, (1, 1, 1)))
                 layer.add_module(f"flat", nn.Flatten(1))
                 layer.add_module(f"lin", nn.Linear(channels[i], 2 * self.z_ch))
-
+                
                 clayer.add_module(f"pool", avg_adt_pool_nd(3, (1, 1, 1)))
                 clayer.add_module(f"flat", nn.Flatten(1))
                 clayer.add_module(f"lin", nn.Linear(channels[i], self.z_ch))
-
+                
             self.vae_enc.add_module(f'layer{i}', layer)
             self.cond_enc.add_module(f'layer{i}', clayer)
-
+        
         in_sizes = in_sizes[::-1]
         cond_in_sizes = cond_in_sizes[::-1]
         channels = channels[::-1]
-
+        
         self.dec = TimestepEmbedSequential()
         for i in range(len(channels)):
             ds = 2 ** (len(channels) - 1 - i)
             layer = TimestepEmbedSequential()
             if i == 0:
-                self.dec.add_module(f"lin", nn.Linear(
-                    self.z_ch, channels[i] * np.prod(in_sizes[i])))
-                self.dec.add_module(f"unflat", nn.Unflatten(
-                    1, (channels[i], *in_sizes[i].tolist())))
+                self.dec.add_module(f"lin", nn.Linear(self.z_ch, channels[i] * np.prod(in_sizes[i])))
+                self.dec.add_module(f"unflat", nn.Unflatten(1, (channels[i], *in_sizes[i].tolist())))
             for j in range(num_res_blocks):
-                layer.add_module(f'res{j}', ResBlock(channels[i], None,
-                                                     out_channels=channels[i],
-                                                     dropout=self.dp,
-                                                     dims=3,
+                layer.add_module(f'res{j}', ResBlock(channels[i], None, 
+                                                     out_channels=channels[i], 
+                                                     dropout = self.dp, 
+                                                     dims = 3, 
                                                      padding_mode='zeros',
-                                                     use_gated_conv=use_gated_conv,
+                                                     use_gated_conv = use_gated_conv,
                                                      gated_conv_heads=gated_conv_heads
                                                      ))
                 if ds in attention_resolutions:
-                    layer.add_module(f'att{j}', AttentionBlock(
-                        channels[i], num_heads=8))
+                    layer.add_module(f'att{j}', AttentionBlock(channels[i], num_heads = 8))
             if i < len(channels) - 1:
-                layer.add_module(f'up', Upsample(
-                    channels[i], True, 3, channels[i + 1], out_size=in_sizes[i + 1]))
-
+                layer.add_module(f'up', Upsample(channels[i], True, 3, channels[i + 1], out_size = in_sizes[i + 1]))
+            
             self.dec.add_module(f'layer{i}', layer)
-
+        
         layer = TimestepEmbedSequential(
             nn.SiLU(),
             conv_nd(3, channels[-1], self.in_ch, 1),
             nn.Sigmoid()
         )
-
+        
         self.dec.add_module('out', layer)
 
     def forward(self, pred):
@@ -1148,18 +1142,18 @@ class CVAE3D(nn.Module):
 
         return total_loss, {'vae': sum(kls), 'conf': conf, 'offset': off}
 
-    def inp_transform(self, input):
+    def inp_transform(self, x):
         # B X Y Z C -> B C Z X Y
-        input = input.permute(0, 4, 3, 1, 2)
-        return input
+        x = x.permute(0, 4, 3, 1, 2)
+        return x
 
-    def out_transform(self, input):
+    def out_transform(self, x):
         # B C Z X Y -> B X Y Z C
-        input = input.permute(0, 3, 4, 2, 1)
-        return input
+        x = x.permute(0, 3, 4, 2, 1)
+        return x
 
-    def reparameterize(self, input):
-        mu, logvar = torch.chunk(input, 2, dim=1)
+    def reparameterize(self, x):
+        mu, logvar = torch.chunk(x, 2, dim=1)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std

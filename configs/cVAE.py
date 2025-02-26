@@ -46,10 +46,11 @@ class Model:
 
 @dataclass
 class Dataset:
-    train_path: str = "datafiles/hdf/surface_basal_train.hdf5"
-    test_path: str = "datafiles/hdf/surface_basal_test.hdf5"
+    train_path: str = "dataset/.mw-vae-data/label"
+    test_path: str = "dataset/.mw-vae-data/label"
     
-    real_size: tuple[float, ...] = (25.0, 25.0, 16.0)
+    real_size: tuple[float, float, float] = (25.0, 25.0, 16.0)
+    box_size: tuple[int, int, int] = (25, 25, 8)
     split: list[float] = field(default_factory=lambda: [0.0, 4.0, 8.0, 12.0, 16.0])
 
 

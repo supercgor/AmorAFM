@@ -4,22 +4,22 @@ import torch
 import utils
 
 from argparse import ArgumentParser
-from ase.visualize import view
 from torch.utils.data import DataLoader
 from torchmetrics import MeanMetric
 from torchvision.utils import make_grid
 from matplotlib import pyplot as plt
 from pathlib import Path
-from utils import box2atom
-from dataset import DetectDataset
-from network import CVAE3D
+
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from configs.cVAE import cVAEConfig as Config
+from src.utils import box2atom
+from src.dataset import DetectDataset
+from src.network import CVAE3D
 
 def get_parser():
     parser = ArgumentParser()
-    parser.add_argument("--debug", action="store_true", help="Debug mode")
+    parser.add_argument("--debug", action="store_true", help="Debug mode", default=True)
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
     parser.add_argument("--outdir", type=str, default="outputs/", help="Working directory")
 
@@ -43,10 +43,9 @@ class Trainer():
         self.train_dts = DetectDataset(
             cfg.dataset.train_path,
             mode='label',
-            real_size=(25.0, 25.0, 16.0),
-            box_size=(25, 25, 8),
+            real_size=self.cfg.dataset.real_size,
+            box_size=self.cfg.dataset.box_size,
             elements=(8, ),
-            flipz=True,
             random_zoffset=(-1.5, -0.5),
             random_top_remove_ratio=0.3,
         )
@@ -54,34 +53,41 @@ class Trainer():
         self.test_dts = DetectDataset(
             cfg.dataset.test_path,
             mode='label',
-            real_size=(25.0, 25.0, 16.0),
-            box_size=(25, 25, 8),
+            real_size=self.cfg.dataset.real_size,
+            box_size=self.cfg.dataset.box_size,
             elements=(8, ),
-            flipz=True,
             random_zoffset=[-1.5, -0.5],
             random_top_remove_ratio=0.3,
         )
 
+        collate_fn = DetectDataset.collate_fn
+        
+        if self.cfg.setting.debug:
+            self.train_dts = torch.utils.data.Subset(self.train_dts, range(500))
+            self.test_dts = torch.utils.data.Subset(self.test_dts, range(500))
+        
         self.train_dtl = DataLoader(self.train_dts,
                                     self.cfg.setting.batch_size,
                                     shuffle=True,
                                     num_workers=self.cfg.setting.num_workers,
                                     pin_memory=self.cfg.setting.pin_memory,
-                                    collate_fn=DetectDataset.collate_fn)
+                                    collate_fn=collate_fn)
         
         self.test_dtl = DataLoader(self.test_dts,
                                    self.cfg.setting.batch_size,
                                    shuffle=True,
                                    num_workers=self.cfg.setting.num_workers,
                                    pin_memory=self.cfg.setting.pin_memory,
-                                   collate_fn=DetectDataset.collate_fn)
+                                   collate_fn=collate_fn)
+        
         self.opt = torch.optim.Adam(self.model.parameters(),
                                     lr=self.cfg.optimizer.lr,
                                     weight_decay=self.cfg.optimizer.weight_decay)
+        
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.opt, **self.cfg.scheduler.params.__dict__)
         self.atom_metrics = utils.MetricCollection(
             M=utils.ConfusionMatrix(count_types=("O", ),
-                                    real_size=(25.0, 25.0, 16.0),
+                                    real_size=self.cfg.dataset.real_size,
                                     split=self.cfg.dataset.split,
                                     match_distance=1.0)
             ).to(self.device)
@@ -108,14 +114,19 @@ class Trainer():
             gm, atom_metric = self.test_one_epoch()
             loss = gm['loss']
             M = atom_metric['M']
-            logstr = f"\n============= Summary Test | Epoch {epoch:2d} ================\nloss: {loss:.2e} | used time: {(time.time() - epoch_start_time)/60:4.1f} mins | {'Model saved' if loss < self.best else 'Model not saved'}"
-            logstr += f"\n=================   Element - 'H2O'   ================="
-            logstr += f"\n(Overall)  AP: {M[:, :,3].mean():.2f} | AR: {M[:, :,4].mean():.2f} | ACC: {M[:, :,5].mean():.2f} | SUC: {M[:, :,6].mean():.2f}"
-            for i, (low, high) in enumerate(zip(self.cfg.dataset.split[:-1], self.cfg.dataset.split[1:])):
-                logstr += f"\n({low:.1f}-{high:.1f}A) AP: {M[0, i,3]:.2f} | AR: {M[0, i,4]:.2f} | ACC: {M[0, i,5]:.2f} | SUC: {M[0, i,6]:.2f}\nTP: {M[0, i,0]:10.0f} | FP: {M[0, i,1]:10.0f} | FN: {M[0, i,2]:10.0f}"
+            self.log.info(f"Test Summary | Epoch {epoch:2d}")
+            self.log.info(f"loss: {loss:.2e} | used time: {(time.time() - epoch_start_time)/60:4.1f} mins | {'Model saved' if loss < self.best else 'Model not saved'}")
+            self.log.info("Overall metrics")
+            self.log.info(f"AP: {M[:, :,3].mean():10.2f}, AR: {M[:, :,4].mean():10.2f}, ACC: {M[:, :,5].mean():9.2f}")
+            self.log.info(f"TP: {M[:, :, 0].mean():10.0f}, FP: {M[:, :, 1].mean():10.0f}, FN: {M[:, :, 2].mean():10.0f}")
+            self.log.info(f"SUC: {M[:, :,6].mean():9.2f}, F1: {(M[:, :,3] * M[:, :,4] * 2 / (M[:, :,3] + M[:, :,4])).mean():10.2f}")
+            for i in range(len(self.cfg.dataset.split) - 1):
+                low, high = self.cfg.dataset.split[i: i+2]
+                self.log.info(f"({low:.1f}-{high:.1f}A) AP: {M[:,i,3].mean():10.2f}, AR: {M[:,i,4].mean():10.2f}, ACC: {M[:,i,5].mean():9.2f}")
+                self.log.info(f"({low:.1f}-{high:.1f}A) TP: {M[:,i,0].mean():10.0f}, FP: {M[:,i,1].mean():10.0f}, FN: {M[:,i,2].mean():10.0f}")
+                self.log.info(f"({low:.1f}-{high:.1f}A) SUC: {M[:,i,6].mean():9.2f}, F1: {(M[:, i,3] * M[:, i,4] * 2 / (M[:, i,3] + M[:, i,4])).mean():10.2f}")
 
             self.save_model(loss)
-            self.log.info(logstr)
 
     def train_one_epoch(self):
         self.grid_metrics.reset()
@@ -137,7 +148,7 @@ class Trainer():
                                                   error_if_nonfinite=True)
             self.opt.step()
 
-            out_atoms = box2atom(out, (25, 25, 16), 0.5, 2.0)
+            out_atoms = box2atom(out.detach().cpu().numpy(), self.cfg.dataset.real_size, 0.5, 2.0)
 
             self.atom_metrics.update(M=(out_atoms, atoms))
             self.grid_metrics.update(loss=loss,
@@ -149,8 +160,9 @@ class Trainer():
             self.iters += 1
 
             if i % self.cfg.setting.log_every == 0:
-                # print(out.shape)
-                # view(atoms, block=True)
+                savedir = self.outdir / f"Epoch{self.epoch:02d}"
+                savedir.mkdir(exist_ok=True)
+                
                 out = out[0, ..., 0].detach().cpu()  # X Y Z
                 out = out.permute(2, 1, 0)[:, None]  # Z 1 Y X
                 out = make_grid(out, nrow=8, pad_value=0.3)[[0]]
@@ -162,9 +174,8 @@ class Trainer():
                 fig = plt.figure(figsize=(16, 8))
                 ax = fig.add_subplot(1, 1, 1)
                 ax.imshow(torch.cat([targs, targs, out], 0).permute(1, 2, 0))
-                fig.savefig(self.outdir/ f"points_{self.epoch:02d}.png")
+                fig.savefig(savedir / f"{i:05d}.png")
                 plt.close(fig)
-                # save_image(torch.cat([targs, targs, out], 0), f"{self.work_dir}/train_{epoch}.png")
 
                 self.log.info(f"E[{self.epoch:2d}/{self.cfg.setting.epoch}], I[{i:5d}/{len(self.train_dtl):5d}], L{loss:.2e}, G{grad:.2e}")
                 utils.log_to_csv(self.outdir / f"train.csv",
@@ -173,9 +184,6 @@ class Trainer():
                                  iter=i,
                                  **self.grid_metrics.compute())
                 self.grid_metrics.reset()
-
-            if self.cfg.setting.debug and i > 100:
-                break
 
         self.scheduler.step()
 
@@ -193,7 +201,7 @@ class Trainer():
 
             loss, loss_values = self.model.compute_loss(out, targs, latents, conds)
 
-            out_atoms = box2atom(out, (25, 25, 16), 0.5, 2.0)
+            out_atoms = box2atom(out.detach().cpu().numpy(), self.cfg.dataset.real_size, 0.5, 2.0)
 
             self.atom_metrics.update(M=(out_atoms, atoms))
             self.grid_metrics.update(loss=loss,
@@ -203,9 +211,6 @@ class Trainer():
 
             if i % self.cfg.setting.log_every == 0:
                 self.log.info(f"E[{self.epoch:2d}/{self.cfg.setting.epoch}], I[{i:5d}/{len(self.test_dtl):5d}], L{loss:.2e}")
-
-            if self.cfg.setting.debug and i > 100:
-                break
 
         return self.grid_metrics.compute(), self.atom_metrics.compute()
 
@@ -217,6 +222,9 @@ class Trainer():
                 os.remove(self.save_paths.pop(0))
             torch.save(self.model.state_dict(), path)
             self.save_paths.append(path)
+            self.log.info(f"Model saved to {path}")
+        else:
+            self.log.info(f"Model not saved")
 
     def load_model(self):
         if self.cfg.model.checkpoint != "":

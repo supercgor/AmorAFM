@@ -96,7 +96,7 @@ def make_grid_samples_points(grid_center, bbox_size, resolution, cell, rot = 0.0
     bbox_center = [bbox_size[0] / 2, bbox_size[1] / 2]
 
     grid = (grid - bbox_center) @ [[np.cos(rot), -np.sin(rot)], [np.sin(rot), np.cos(rot)]]
-    grid = (grid + grid_center) @ np.linalg.inv(cell[:2, :2])
+    grid = (grid + grid_center) @ np.linalg.inv(cell[-2::-1, -2::-1])
     grid = (grid - 0.5) * 2
     grid = grid[..., (1, 0)]
     return grid
@@ -393,18 +393,8 @@ def box2atom(box,
              threshold=0.5,
              cutoff: float | tuple[float, float] = 2.0,
              nms=True,
-             num_workers = 1,
              order = ("O", "H"),
              ):
-    
-    if box.ndim > 4:
-        if num_workers > 1:
-            fn = partial(box2atom, cell=cell, threshold=threshold, cutoff=cutoff, nms=nms, order = order)
-            with Pool() as p:
-                return p.map(fn, box)
-        else:
-            return list(map(lambda x: box2atom(x, cell=cell, threshold=threshold, cutoff=cutoff, nms=nms, order = order), box))
-
     atoms = Atoms(cell=cell, pbc=False)
     for i in range(box.shape[-1] // 4):
         cut = cutoff[0] if isinstance(cutoff, tuple) else cutoff

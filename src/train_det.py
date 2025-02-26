@@ -3,13 +3,12 @@ import numpy as np
 import time
 import torch
 import utils
-
+from functools import partial
 from argparse import ArgumentParser
 from torch.utils.data import DataLoader
 from torchmetrics import MeanMetric
-from torchvision.utils import save_image
-from matplotlib import pyplot as plt
 from pathlib import Path
+from multiprocessing import Pool
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from configs.detect import DetectConfig as Config
@@ -185,12 +184,11 @@ class Trainer():
                                                   self.cfg.optimizer.clip_grad,
                                                   error_if_nonfinite=False)
             self.opt.step()
-            out_atoms = box2atom(preds.detach().cpu().numpy(),
-                                 self.cfg.dataset.real_size,
-                                 0.5,
-                                 cutoff=(1.036, 0.7392),
-                                 nms=self.cfg.dataset.nms)
-
+            
+            with Pool(self.cfg.setting.num_workers) as p:
+                fn = partial(box2atom, cell = self.cfg.dataset.real_size, threshold = 0.5, cutoff = (1.036, 0.7392), nms = self.cfg.dataset.nms)
+                out_atoms = p.map(fn, preds.detach().cpu().numpy())
+                
             self.atom_metrics.update(M=(out_atoms, atoms))
             self.grid_metrics.update(loss=loss,
                                      grad=grad,
@@ -239,12 +237,9 @@ class Trainer():
             preds = self.model(inps)
             loss, loss_values = self.model.compute_loss(preds, targs)
 
-            out_atoms = box2atom(preds.detach().cpu().numpy(),
-                                 tuple(self.cfg.dataset.real_size),
-                                 0.5,
-                                 cutoff=(1.036, 0.7392),
-                                 nms=self.cfg.dataset.nms,
-                                 num_workers=self.cfg.setting.num_workers)
+            with Pool(self.cfg.setting.num_workers) as p:
+                fn = partial(box2atom, cell = self.cfg.dataset.real_size, threshold = 0.5, cutoff = (1.036, 0.7392), nms = self.cfg.dataset.nms)
+                out_atoms = p.map(fn, preds.detach().cpu().numpy())
 
             self.atom_metrics.update(M=(out_atoms, atoms))
             self.grid_metrics.update(loss=loss,
