@@ -1,7 +1,4 @@
-# AmorAFM
-
-
-# Paper template for the pinga-lab (*replace with paper title*)
+# Unveiling the phase diagram of ice premelting through a novel machine learning framework integrating AFM Technology
 
 by
 Binze Tang†, 

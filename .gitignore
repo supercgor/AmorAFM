@@ -172,3 +172,8 @@ cython_debug/
 
 dataset/*
 outputs/*/
+
+# exclude the example 
+!dataset/ss0
+!dataset/pretrain-det.pkl
+!dataset/pretrain-vae.pkl
