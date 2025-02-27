@@ -1,0 +1,15 @@
+# requirements.txt
+ase
+matplotlib
+networkx
+numpy
+pandas
+pillow
+scikit-learn
+scipy
+torch
+torch-fidelity
+torchaudio
+torchmetrics
+torchvision
+tqdm
