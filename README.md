@@ -88,12 +88,12 @@ Before running any code you must activate the virtual environment:
 
     source .venv/bin/activate
 
-And download the data and pre-trained models from the following link:
+And download the data and pre-trained models from the following link to `dataset` folder:
     ...
 
 To predict the AFM images, you should prepare directories as follows:
 
-- 📦 name_of_dir
+- 📦 ss0
 -  ┣ 📜 0.png
 -  ┣ 📜 1.png
 -  ┣ 📜 2.png
@@ -102,7 +102,7 @@ To predict the AFM images, you should prepare directories as follows:
 
 Run the code:
 
-    python3 tools/eval.py -i name_of_dir
+    python3 tools/eval.py -i dataset/ss0
 
 ## License
 
