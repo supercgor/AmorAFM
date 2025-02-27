@@ -58,13 +58,13 @@ class Optimizer:
 
 @dataclass
 class Dataset:
-    source_path: str = "datafiles/20240923-bulk-Hup-train/afm"
-    target_path: str = "datafiles/20240923-crop-afm"
+    source_path: str = "dataset/.detect-train/afm"
+    target_path: str = ""
     
     num_images: list[int] = field(default_factory=lambda: [4, 3, 3])
     image_size: tuple[int, int] = (100, 100)
     image_split: list[int] = field(default_factory=lambda: [8, 16])
-    real_size: tuple[float, ...] = (25.0, 25.0, 3.0)
+    real_size: tuple[float, float, float] = (25.0, 25.0, 3.0)
     ion_type: list[str] = field(default_factory=lambda: ['O', 'H'])
     split: list[float] = field(default_factory=lambda: [0.0, 3.0])
     nms: bool = True

@@ -4,12 +4,13 @@ import torch
 import utils
 
 from argparse import ArgumentParser
+from functools import partial
+from matplotlib import pyplot as plt
+from multiprocessing import Pool
+from pathlib import Path
 from torch.utils.data import DataLoader
 from torchmetrics import MeanMetric
 from torchvision.utils import make_grid
-from matplotlib import pyplot as plt
-from pathlib import Path
-
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from configs.cVAE import cVAEConfig as Config
@@ -40,25 +41,21 @@ class Trainer():
 
         self.model = CVAE3D(**self.cfg.model.params.__dict__).to(self.device)
 
-        self.train_dts = DetectDataset(
-            cfg.dataset.train_path,
-            mode='label',
-            real_size=self.cfg.dataset.real_size,
-            box_size=self.cfg.dataset.box_size,
-            elements=(8, ),
-            random_zoffset=(-1.5, -0.5),
-            random_top_remove_ratio=0.3,
-        )
+        self.train_dts = DetectDataset(cfg.dataset.train_path,
+                                       mode='label',
+                                       real_size=self.cfg.dataset.real_size,
+                                       box_size=self.cfg.dataset.box_size,
+                                       elements=(8, ),
+                                       random_zoffset=(-1.5, -0.5),
+                                       random_top_remove_ratio=0.3)
 
-        self.test_dts = DetectDataset(
-            cfg.dataset.test_path,
-            mode='label',
-            real_size=self.cfg.dataset.real_size,
-            box_size=self.cfg.dataset.box_size,
-            elements=(8, ),
-            random_zoffset=[-1.5, -0.5],
-            random_top_remove_ratio=0.3,
-        )
+        self.test_dts = DetectDataset(cfg.dataset.test_path,
+                                      mode='label',
+                                      real_size=self.cfg.dataset.real_size,
+                                      box_size=self.cfg.dataset.box_size,
+                                      elements=(8, ),
+                                      random_zoffset=[-1.5, -0.5],
+                                      random_top_remove_ratio=0.3)
 
         collate_fn = DetectDataset.collate_fn
         
@@ -97,8 +94,8 @@ class Trainer():
             grad=MeanMetric(),
             conf=MeanMetric(),
             off=MeanMetric(),
-            kl=MeanMetric(),
-        ).to(self.device)
+            kl=MeanMetric()
+            ).to(self.device)
 
         self.save_paths = []
         self.best = np.inf
@@ -148,8 +145,13 @@ class Trainer():
                                                   error_if_nonfinite=True)
             self.opt.step()
 
-            out_atoms = box2atom(out.detach().cpu().numpy(), self.cfg.dataset.real_size, 0.5, 2.0)
-
+            fn = partial(box2atom, cell = self.cfg.dataset.real_size, threshold = 0.5, cutoff = 2.0)
+            if self.cfg.setting.num_workers > 1:
+                with Pool(self.cfg.setting.num_workers) as p:
+                    out_atoms = p.map(fn, out.detach().cpu().numpy())
+            else:
+                out_atoms = list(map(fn, out.detach().cpu().numpy()))
+                
             self.atom_metrics.update(M=(out_atoms, atoms))
             self.grid_metrics.update(loss=loss,
                                      grad=grad,
@@ -170,7 +172,7 @@ class Trainer():
                 targs = targs[0, ..., 0].detach().cpu()
                 targs = targs.permute(2, 1, 0)[:, None]
                 targs = make_grid(targs, nrow=8, pad_value=0.3)[[0]]
-                # print(targs.shape, out.shape)
+
                 fig = plt.figure(figsize=(16, 8))
                 ax = fig.add_subplot(1, 1, 1)
                 ax.imshow(torch.cat([targs, targs, out], 0).permute(1, 2, 0))
@@ -201,7 +203,12 @@ class Trainer():
 
             loss, loss_values = self.model.compute_loss(out, targs, latents, conds)
 
-            out_atoms = box2atom(out.detach().cpu().numpy(), self.cfg.dataset.real_size, 0.5, 2.0)
+            fn = partial(box2atom, cell = self.cfg.dataset.real_size, threshold = 0.5, cutoff = 2.0)
+            if self.cfg.setting.num_workers > 1:
+                with Pool(self.cfg.setting.num_workers) as p:
+                    out_atoms = p.map(fn, out.detach().cpu().numpy())
+            else:
+                out_atoms = list(map(fn, out.detach().cpu().numpy()))
 
             self.atom_metrics.update(M=(out_atoms, atoms))
             self.grid_metrics.update(loss=loss,
@@ -252,13 +259,14 @@ def main():
 
     cfg = Config()
 
-    outdir = Path(args.outdir) / f"{time.strftime('%Y%m%d-%H%M%S')}-cycleGAN"
+    outdir = Path(args.outdir) / f"{time.strftime('%Y%m%d-%H%M%S')}-cvae"
     
     cfg.setting.device = args.device
     cfg.setting.outdir = str(outdir)
     cfg.setting.debug = args.debug
     
     if cfg.setting.debug:
+        cfg.setting.num_workers = 0
         cfg.setting.log_every = 1
         cfg.setting.batch_size = 2
         cfg.setting.max_save = 1

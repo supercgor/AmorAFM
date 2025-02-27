@@ -18,7 +18,7 @@ from src.utils import box2atom, plot_preditions
 
 def get_parser():
     parser = ArgumentParser()
-    parser.add_argument("--debug", action="store_true", help="Debug mode", default=True)
+    parser.add_argument("--debug", action="store_true", help="Debug mode")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
     parser.add_argument("--outdir", type=str, default="outputs/", help="Working directory")
     return parser.parse_args()
@@ -52,13 +52,11 @@ class Trainer():
                                        real_size=self.cfg.dataset.real_size,
                                        box_size=self.cfg.dataset.box_size,
                                        random_transform=True,
-                                       random_noisy=0.1,
+                                       random_blur=True,
                                        random_cutout=True,
                                        random_jitter=True,
-                                       random_blur=True,
-                                       random_shift=True,
-                                       random_flipx=False,
-                                       random_flipy=False)
+                                       random_noisy=0.1,
+                                       random_shift=True)
 
         self.test_dts = DetectDataset(cfg.dataset.test_path,
                                       mode='afm+label',
@@ -68,10 +66,10 @@ class Trainer():
                                       real_size=self.cfg.dataset.real_size,
                                       box_size=self.cfg.dataset.box_size,
                                       random_transform=True,
-                                      random_noisy=0.1,
+                                      random_blur=True,
                                       random_cutout=True,
                                       random_jitter=True,
-                                      random_blur=True,
+                                      random_noisy=0.1,
                                       random_shift=True)
 
         collate_fn = self.train_dts.collate_fn
@@ -185,9 +183,12 @@ class Trainer():
                                                   error_if_nonfinite=False)
             self.opt.step()
             
-            with Pool(self.cfg.setting.num_workers) as p:
-                fn = partial(box2atom, cell = self.cfg.dataset.real_size, threshold = 0.5, cutoff = (1.036, 0.7392), nms = self.cfg.dataset.nms)
-                out_atoms = p.map(fn, preds.detach().cpu().numpy())
+            fn = partial(box2atom, cell = self.cfg.dataset.real_size, threshold = 0.5, cutoff = (1.036, 0.7392), nms = self.cfg.dataset.nms)
+            if self.cfg.setting.num_workers >= 1:
+                with Pool(self.cfg.setting.num_workers) as p:
+                    out_atoms = p.map(fn, preds.detach().cpu().numpy())
+            else:
+                out_atoms = list(map(fn, preds.detach().cpu().numpy()))
                 
             self.atom_metrics.update(M=(out_atoms, atoms))
             self.grid_metrics.update(loss=loss,
@@ -237,9 +238,12 @@ class Trainer():
             preds = self.model(inps)
             loss, loss_values = self.model.compute_loss(preds, targs)
 
-            with Pool(self.cfg.setting.num_workers) as p:
-                fn = partial(box2atom, cell = self.cfg.dataset.real_size, threshold = 0.5, cutoff = (1.036, 0.7392), nms = self.cfg.dataset.nms)
-                out_atoms = p.map(fn, preds.detach().cpu().numpy())
+            fn = partial(box2atom, cell = self.cfg.dataset.real_size, threshold = 0.5, cutoff = (1.036, 0.7392), nms = self.cfg.dataset.nms)
+            if self.cfg.setting.num_workers >= 1:
+                with Pool(self.cfg.setting.num_workers) as p:
+                    out_atoms = p.map(fn, preds.detach().cpu().numpy())
+            else:
+                out_atoms = list(map(fn, preds.detach().cpu().numpy()))
 
             self.atom_metrics.update(M=(out_atoms, atoms))
             self.grid_metrics.update(loss=loss,

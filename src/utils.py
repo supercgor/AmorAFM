@@ -7,19 +7,13 @@ import warnings
 import pandas as pd
 
 from ase import Atoms
-from multiprocessing import Pool
 from pathlib import Path
 from matplotlib import pyplot as plt
-from functools import partial
 from scipy.spatial import KDTree
-from scipy.spatial.transform import Rotation as R
 from scipy.spatial.distance import cdist
 from sklearn.cluster import DBSCAN
-from torch import nn, Tensor
 from torch.utils.data import Sampler
-from torch.nn import functional as F
 from torchmetrics import Metric
-from torchvision.utils import make_grid
 
 
 def get_logger(name, save_dir = None, level: int = logging.INFO):
@@ -34,7 +28,7 @@ def get_logger(name, save_dir = None, level: int = logging.INFO):
 
 def log_to_csv(path, **kwargs):
     for k, v in kwargs.items():
-        if isinstance(v, Tensor):
+        if isinstance(v, torch.Tensor):
             kwargs[k] = v.detach().cpu().numpy()
             
     df = pd.DataFrame([kwargs])
@@ -207,36 +201,10 @@ def box2vec(box_cls, box_off, *args, threshold=0.5):
     box_cls = box_cls[mask]
     box_off = box_off[mask] + np.stack(mask, axis=-1)
     box_off = box_off / [X, Y, Z]
-    # box_off = box_off[:, [1, 0, 2]] / [Y, X, Z]
-    # box_off[:, 1] = 1 - box_off[:, 1]
     args = [arg[mask] for arg in args]
     return box_cls, box_off, *args
-    # Y, X, Z = box_cls.shape
-    # mask = np.nonzero(box_cls > threshold)
-    # box_cls = box_cls[mask]
-    # box_off = box_off[mask] + np.stack([mask[1], mask[0] - Y, mask[2]], axis=-1)
-    # box_off = box_off / [X, -Y, Z]
-    # args = [arg[mask] for arg in args]
-    # return box_cls, box_off, *args
-
 
 def masknms(pos, cutoff):
-    """
-    _summary_
-
-    Args:
-        pos (Tensor): N 3
-
-    Returns:
-        Tensor: N 3
-    """
-    if isinstance(pos, Tensor):
-        return _masknms_th(pos, cutoff)
-    else:
-        return _masknms_np(pos, cutoff)
-
-
-def _masknms_np(pos, cutoff):
     mask = np.ones(pos.shape[0], dtype=np.bool_)
     for i in range(pos.shape[0]):
         if mask[i]:
@@ -244,26 +212,9 @@ def _masknms_np(pos, cutoff):
                 (pos[i + 1:] - pos[i])**2, axis=1) > cutoff**2)
     return mask
 
-
-def _masknms_th(pos, cutoff):
-    mask = torch.ones(pos.shape[0], dtype=torch.bool, device=pos.device)
-    for i in range(pos.shape[0]):
-        if mask[i]:
-            mask[i + 1:] = mask[i + 1:] & (torch.sum(
-                (pos[i + 1:] - pos[i])**2, dim=1) > cutoff**2)
-    return mask
-
 def argmatch(pred, targ, cutoff):
     # This function is only true when one prediction does not match two targets and one target can match more than two predictions
     # return pred_ind, targ_ind
-    if isinstance(pred, Tensor):
-        return _argmatch_th(pred, targ, cutoff)
-    else:
-        return _argmatch_np(pred, targ, cutoff)
-
-
-def _argmatch_np(pred: np.ndarray, targ: np.ndarray,
-                 cutoff: float) -> tuple[np.ndarray, ...]:
     dis = cdist(targ, pred)
     dis = np.stack((dis < cutoff).nonzero(), axis=-1)
     dis = dis[:, (1, 0)]
@@ -278,28 +229,6 @@ def _argmatch_np(pred: np.ndarray, targ: np.ndarray,
     dis = dis[idx]
     return dis[:, 0], dis[:, 1]
 
-
-def _argmatch_th(pred: Tensor, targ: Tensor,
-                 cutoff: float) -> tuple[Tensor, ...]:
-    dis = torch.cdist(targ, pred)
-    dis = (dis < cutoff).nonzero()
-    dis = dis[:, (1, 0)]
-    _, idx, counts = torch.unique(dis[:, 1],
-                                  sorted=True,
-                                  return_inverse=True,
-                                  return_counts=True)
-    idx = torch.argsort(idx, stable=True)
-    counts = counts.cumsum(0)
-    if counts.shape[0] != 0:
-        counts = torch.cat([
-            torch.as_tensor([0], dtype=counts.dtype, device=counts.device),
-            counts[:-1]
-        ])
-    idx = idx[counts]
-    dis = dis[idx]
-    return dis[:, 0], dis[:, 1]
-
-
 def group_as_water(O_position, H_position):
     """
     Group the oxygen and hydrogen to water molecule
@@ -311,7 +240,7 @@ def group_as_water(O_position, H_position):
     Returns:
         ndarray | Tensor: (N, 9)
     """
-    if isinstance(O_position, Tensor):
+    if isinstance(O_position, torch.Tensor):
         dis = torch.cdist(O_position, H_position)
         dis = torch.topk(dis, 2, dim=1, largest=False).indices
         return torch.cat([O_position, H_position[dis].view(-1, 6)], dim=-1)
@@ -421,116 +350,6 @@ def makewater(pos: np.ndarray, rot: np.ndarray):
 
     # print( np.einsum("ij,Njk->Nik", water, rot) )
     return np.einsum("ij,Njk->Nik", water, rot) + pos[:, None, :]
-
-
-def __encode_th(positions):
-    positions = positions.reshape(-1, 9)
-    o, u, v = positions[..., 0:3], positions[..., 3:6], positions[..., 6:]
-    u, v = u + v - 2 * o, u - v
-    u = u / torch.norm(u, dim=-1, keepdim=True)
-    v = v / torch.norm(v, dim=-1, keepdim=True)
-    v = torch.where(v[..., 1].unsqueeze(-1) >= 0, v, -v)
-    v = torch.where(v[..., 0].unsqueeze(-1) >= 0, v, -v)
-    return torch.cat([o, u, v], dim=-1)
-
-
-def __encode_np(positions: np.ndarray):
-    positions = positions.reshape(-1, 9)
-    o, u, v = positions[..., 0:3], positions[..., 3:6], positions[..., 6:]
-    u, v = u + v - 2 * o, u - v
-    u = u / np.expand_dims(((u**2).sum(axis=-1)**0.5), -1)
-    v = v / np.expand_dims(((v**2).sum(axis=-1)**0.5), -1)
-    v = np.where(v[..., 1][..., None] >= 0, v, -v)
-    v = np.where(v[..., 0][..., None] >= 0, v, -v)
-    return np.concatenate((o, u, v), axis=-1)
-
-
-def __decode_th(emb):
-    o, u, v = emb[..., 0:3], emb[..., 3:6], emb[..., 6:]
-    h1 = (0.612562225 * u + 0.790422368 * v) * 0.9584 + o
-    h2 = (0.612562225 * u - 0.790422368 * v) * 0.9584 + o
-    return torch.cat([o, h1, h2], dim=-1)
-
-
-def __decode_np(emb):
-    o, u, v = emb[..., 0:3], emb[..., 3:6], emb[..., 6:]
-    h1 = (0.612562225 * u + 0.790422368 * v) * 0.9584 + o
-    h2 = (0.612562225 * u - 0.790422368 * v) * 0.9584 + o
-    return np.concatenate((o, h1, h2), axis=-1)
-
-
-def encodewater(positions):
-    if isinstance(positions, torch.Tensor):
-        return __encode_th(positions)
-    else:
-        return __encode_np(positions)
-
-
-def decodewater(emb):
-    if isinstance(emb, Tensor):
-        return __decode_th(emb)
-    else:
-        return __decode_np(emb)
-
-
-def rotate(points, rotation_vector: np.ndarray):
-    """
-    Rotate the points with rotation_vector.
-
-    Args:
-        points (_type_): shape (..., 3)
-        rotation_vector (_type_): rotation along x, y, z axis. shape (3,)
-    """
-    if points.shape[-1] == 2:
-        rotation_vector = np.array([0, 0, rotation_vector])
-    rotation_matrix = R.from_rotvec(rotation_vector).as_matrix()
-
-    if isinstance(points, Tensor):
-        rotation_matrix = torch.as_tensor(rotation_matrix)
-
-    if points.shape[-1] == 3:
-        return points @ rotation_matrix.T
-
-    elif points.shape[-1] == 2:
-        return points @ rotation_matrix.T[:2, :2]
-
-    else:
-        raise NotImplementedError("Only 2D and 3D rotation is implemented.")
-
-
-def logit(x, eps=1E-7):
-    if isinstance(x, (float, np.ndarray)):
-        return -np.log(1 / (x + eps) - 1)
-    else:
-        return torch.logit(x, eps)
-
-
-def replicate(points: np.ndarray, times: list[int], offset: np.ndarray) -> np.ndarray:
-    """
-    Replicate the points with times and offset.
-
-    Args:
-        points (ndarray): shape (N, 3)
-        times (list[int]): [x times, y times, z times]
-        offset (ndarray): shape (3, 3) 3 vectors
-
-    Returns:
-        _type_: _description_
-    """
-    if len(offset.shape) == 1:
-        offset = np.diag(offset)
-
-    for i, (t, o) in enumerate(zip(times, offset)):
-        if t == 1:
-            continue
-        buf = []
-        low = -(t // 2)
-        for j in range(low, low + t):
-            res = points + j * o
-            buf.append(res)
-        points = np.concatenate(buf, axis=0)
-    return points
-
 
 def combine_atoms(atom_list, eps=0.5):
     all_atoms = atom_list[0]
@@ -950,6 +769,7 @@ def water_solver(atoms, r = 0.9572, deg = 104.52):
     h_atoms = []
     for o, h in o_nei.items():
         o_pos = atoms.positions[o]
+        
         if len(h) == 0:
             h1 = o_pos + np.random.randn(3)
             h2 = None
@@ -991,8 +811,16 @@ def water_solver(atoms, r = 0.9572, deg = 104.52):
         h_atoms.append(h1)
         h_atoms.append(h2)
         
+    o_mask = np.array(list(o_nei.keys()))
+    
     o_atoms = atoms[o_mask]
-    
+    o_atoms.set_array('id', np.arange(len(o_atoms)) * 3)
+    hid = 3 * np.arange(len(o_atoms))[:,None] + [1, 2]
+    hid = hid.flatten()
     h_atoms = Atoms("H" * len(h_atoms), positions = h_atoms)
+    h_atoms.set_array('id', hid)
     
-    return o_atoms + h_atoms
+    out = o_atoms + h_atoms
+    args = np.argsort(out.get_array('id'))
+    out = out[args]
+    return out

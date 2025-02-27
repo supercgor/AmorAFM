@@ -25,6 +25,8 @@ def parse_args():
                         help='Path to the AFM images or structure', required=True)
     parser.add_argument('-o', '--output', type=str,
                         help='Output path', default='outputs/')
+    parser.add_argument('-f', '--output-format', type=str,
+                        help='Output format', choices=['xyz', 'data'], default='xyz')
 
     parser.add_argument('--device', type=str,
                         help='Device to use', default='cuda')
@@ -44,7 +46,7 @@ def parse_args():
     return parser.parse_args()
 
 def find_best(atoms, s_tag=0.5, n=10):
-    pos = Ih_positions[:16] % np.diag(Ih_cell)
+    pos = Ih_positions[::3] % np.diag(Ih_cell)
     atree = KDTree(pos, boxsize=np.diag(Ih_cell))
     a, z = Ih_cell[0, 0] / 3, Ih_cell[2, 2]
     bounds = [(-0.5 * a,              a),
@@ -101,15 +103,8 @@ def main(args):
                                 image_split=None,
                                 real_size=cfg.dataset.real_size,
                                 box_size=(32, 32, 4),
-                                random_transform=False,
-                                random_noisy=0.1,
-                                random_cutout=True,
-                                random_jitter=True,
-                                random_blur=True,
-                                random_shift=True,
-                                random_flipx=False,
-                                random_flipy=False,
-                                normalize=False)
+                                random_transform=False
+                                )
 
         pre_atoms = []
 
@@ -207,27 +202,23 @@ def main(args):
         cell_z = 3
 
         grids = np.stack(np.meshgrid(np.arange(cell_x),
-                                    np.arange(cell_y),
-                                    np.arange(cell_z)), axis=-1
-                        ).reshape(-1, 3)  # N x 3
+                                     np.arange(cell_y),
+                                     np.arange(cell_z)), axis=-1).reshape(-1, 3)  # N x 3
 
-        crystal_part_pos = (Ih_positions[None] +
-                            (grids @ Ih_cell)[:, None]).reshape(-1, 3)
-        crystal_part_num = np.array([8] * 16 + [1] * 32)
-        crystal_part_num = np.tile(crystal_part_num, grids.shape[0])
+        crystal_part_pos = (Ih_positions[None] + (grids @ Ih_cell)[:, None]).reshape(-1, 3)
         crystal_part_cell = Ih_cell * np.array([cell_x, cell_y, cell_z])
-
-        crystal_part = Atoms(positions=crystal_part_pos,
-                            cell=crystal_part_cell, numbers=crystal_part_num)
-
+        crystal_part_num = np.tile([8, 1, 1], 16 * grids.shape[0])
+        crystal_part = Atoms(positions=crystal_part_pos, cell=crystal_part_cell, numbers=crystal_part_num)
+        crystal_part.set_array('id', np.arange(len(crystal_part)))
+        
         amorphous_part.positions[:, :2] -= (o_cell[0] / 2, o_cell[1] / 2)
-        r = R.from_euler('z', ang)
-        amorphous_part.positions = r.apply(amorphous_part.positions)
-        amorphous_part.positions += best_param[:3]
-        amorphous_part.positions += (cell_x * Ih_cell[0, 0] / 2,
-                                    cell_y * Ih_cell[1, 1] / 2,
-                                    cell_z * Ih_cell[2, 2] - args.z_ref)
-
+        amorphous_part.positions = R.from_euler('z', ang).apply(amorphous_part.positions)
+        amorphous_part.positions += (best_param[0] + cell_x * Ih_cell[0, 0] / 2,
+                                     best_param[1] + cell_y * Ih_cell[1, 1] / 2,
+                                     best_param[2] + cell_z * Ih_cell[2, 2] - args.z_ref)
+        
+        amorphous_part.arrays['id'] += len(crystal_part)
+        
         results = crystal_part + amorphous_part
         results.cell[2, 2] += args.z_padding
         

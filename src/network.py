@@ -5,27 +5,14 @@ import torch
 from abc import abstractmethod
 from functools import partial
 from itertools import chain
+from typing import Any
 from torch import nn, Tensor
 from torch.nn import functional as F
 
-
 # =============================================
 # Adapted from github repo: https://github.com/AlexGraikos/diffusion_priors
-def conv_nd(dims,
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride = 1,
-            padding = 0,
-            dilation = 1,
-            groups = 1,
-            bias = True,
-            padding_mode = "zeros",
-            *args,
-            **kwargs):
-    """
-    Create a 1D, 2D, or 3D convolution module.
-    """
+def conv_nd(dims, in_channels, out_channels, kernel_size, stride: Any = 1, padding = 0, dilation = 1,
+            groups = 1, bias = True, padding_mode = "zeros", *args, **kwargs):
     if dims == 1:
         return nn.Conv1d(in_channels, out_channels, kernel_size, stride,
                          padding, dilation, groups, bias, padding_mode, *args,
@@ -40,26 +27,8 @@ def conv_nd(dims,
                          **kwargs)
     raise ValueError(f"unsupported dimensions: {dims}")
 
-
-def linear(*args, **kwargs):
-    """
-    Create a linear module.
-    """
-    return nn.Linear(*args, **kwargs)
-
-
-def max_pool_nd(dims,
-                kernel_size,
-                stride=None,
-                padding=0,
-                dilation=1,
-                return_indices=False,
-                ceil_mode=False,
-                *args,
-                **kwargs):
-    """
-    Create a 1D, 2D, or 3D max pooling module.
-    """
+def max_pool_nd(dims, kernel_size, stride = None, padding=0, dilation=1, return_indices=False,
+                ceil_mode=False, *args, **kwargs):
     if dims == 1:
         return nn.MaxPool1d(kernel_size, stride, padding, dilation,
                             return_indices, ceil_mode, *args, **kwargs)
@@ -71,18 +40,8 @@ def max_pool_nd(dims,
                             return_indices, ceil_mode, *args, **kwargs)
     raise ValueError(f"unsupported dimensions: {dims}")
 
-
-def avg_pool_nd(dims,
-                kernel_size,
-                stride=None,
-                padding=0,
-                ceil_mode=False,
-                count_include_pad=True,
-                *args,
-                **kwargs):
-    """
-    Create a 1D, 2D, or 3D average pooling module.
-    """
+def avg_pool_nd(dims, kernel_size, stride: Any = None, padding=0, ceil_mode=False,
+                count_include_pad=True, *args, **kwargs):
     if dims == 1:
         return nn.AvgPool1d(kernel_size, stride, padding, ceil_mode,
                             count_include_pad, *args, **kwargs)
@@ -94,11 +53,7 @@ def avg_pool_nd(dims,
                             count_include_pad, *args, **kwargs)
     raise ValueError(f"unsupported dimensions: {dims}")
 
-
 def max_adt_pool_nd(dims, *args, **kwargs):
-    """
-    Create a 1D, 2D, or 3D adaptive max pooling module.
-    """
     if dims == 1:
         return nn.AdaptiveMaxPool1d(*args, **kwargs)
     elif dims == 2:
@@ -107,11 +62,7 @@ def max_adt_pool_nd(dims, *args, **kwargs):
         return nn.AdaptiveMaxPool3d(*args, **kwargs)
     raise ValueError(f"unsupported dimensions: {dims}")
 
-
 def avg_adt_pool_nd(dims, *args, **kwargs):
-    """
-    Create a 1D, 2D, or 3D adaptive average pooling module.
-    """
     if dims == 1:
         return nn.AdaptiveAvgPool1d(*args, **kwargs)
     elif dims == 2:
@@ -120,14 +71,8 @@ def avg_adt_pool_nd(dims, *args, **kwargs):
         return nn.AdaptiveAvgPool3d(*args, **kwargs)
     raise ValueError(f"unsupported dimensions: {dims}")
 
-
 def normalization(channels):
     return nn.GroupNorm(min(32, channels), channels)
-    # if channels < 32:
-    #     return nn.GroupNorm(min(1, channels // 2), channels)
-
-    # return nn.GroupNorm(32, channels)
-
 
 def timestep_embedding(timesteps, dim, max_period=10000):
     """
@@ -496,11 +441,7 @@ class ResBlock(TimestepBlock):
         if self.emb_channels is not None:
             self.emb_layers = nn.Sequential(
                 _acti,
-                linear(
-                    emb_channels,
-                    2 * self.out_channels
-                    if use_scale_shift_norm else self.out_channels,
-                ),
+                nn.Linear(emb_channels, 2 * self.out_channels if use_scale_shift_norm else self.out_channels),
             )
 
         if self.out_channels == channels:
@@ -663,12 +604,12 @@ class PositionalEncoding(nn.Module):
         self._cache = None
 
     def forward(
-            self, x: torch.Tensor | tuple,
-            device=torch.device("cpu")) -> torch.Tensor:
+            self, x: torch.Tensor | tuple, device=torch.device("cpu")):
         if isinstance(x, tuple):
             xshape = x
         else:
             xshape = x.shape[1:-1]
+            
         if xshape == self._cache_shape:
             return self._cache
         else:
@@ -986,12 +927,11 @@ class CVAE3D(nn.Module):
         self.vae_weight = vae_weight or 1.0
         pos_weight = pos_weight or [1.0]
         
-        self.register_buffer(
-            'pos_weight', torch.tensor(pos_weight, dtype=torch.float))
+        self.pos_weight: torch.Tensor
+        self.register_buffer('pos_weight', torch.tensor(pos_weight, dtype=torch.float))
 
         channels = [self.ch * ch_mult for ch_mult in channel_mult]
 
-        _conv = partial(GatedConvNd, num_heads = gated_conv_heads) if use_gated_conv else conv_nd
         self.in_conv = conv_nd(3, self.in_ch, self.ch, 1)
         
         in_sizes = [in_size]
@@ -1298,106 +1238,107 @@ class CycleGAN(nn.Module):
             z_down=disc_z_down,
         )
 
-        self.G_params = chain(self.G_to_A.parameters(),
-                              self.G_to_B.parameters())
+        self.G_params = chain(self.G_to_A.parameters(), self.G_to_B.parameters())
         self.D_params = chain(self.D_A.parameters(), self.D_B.parameters())
-
         self.cls_weight = 1.0
         self.cyc_weight = 10.0
         self.idt_weight = 0.5
 
     @torch.no_grad()
     def to_A(self, target):
-        self.G_to_A.eval()
+        self.G_to_A.eval().requires_grad_(False)
         return self.G_to_A(target)
 
     @torch.no_grad()
     def to_B(self, source):
-        self.G_to_B.eval()
+        self.G_to_B.eval().requires_grad_(False)
         return self.G_to_B(source)
 
-    def forward_gen(self, source, target):
-        self.G_to_A.train()
-        self.G_to_B.train()
-        self.D_A.eval()
-        self.D_B.eval()
+    def forward_gen(self, real_A, real_B):        
+        self.G_to_A.train().requires_grad_(True)
+        self.G_to_B.train().requires_grad_(True)
+        self.D_A.eval().requires_grad_(False)
+        self.D_B.eval().requires_grad_(False)
 
-        self.real_A = source
-        self.real_B = target
+        fake_A = self.G_to_A(real_B)
+        fake_A_score = self.D_A(fake_A)
+        cycle_B = self.G_to_B(fake_A)
+        
+        cls_A_loss = F.binary_cross_entropy(fake_A_score, torch.ones_like(fake_A_score))
+        cycle_B_loss = F.l1_loss(real_B, cycle_B)
+        
+        (cls_A_loss * self.cls_weight + cycle_B_loss * self.cyc_weight).backward()
+        
+        fake_B = self.G_to_B(real_A)
+        fake_B_score = self.D_B(fake_B)
+        cycle_A = self.G_to_A(fake_B)
+        
+        cls_B_loss = F.binary_cross_entropy(fake_B_score, torch.ones_like(fake_B_score))
+        cycle_A_loss = F.l1_loss(real_A, cycle_A)
+        
+        (cls_B_loss * self.cls_weight + cycle_A_loss * self.cyc_weight).backward()
+        
+        idt_A = self.to_A(real_A)
+        
+        idt_A_loss = F.l1_loss(real_A, idt_A)
+        
+        (idt_A_loss * self.idt_weight).backward()
+        
+        idt_B = self.to_B(real_B)
+        
+        idt_B_loss = F.l1_loss(real_B, idt_B)
+        
+        (idt_B_loss * self.idt_weight).backward()
+        
+        self.real_A = real_A.detach().cpu().numpy()
+        self.real_B = real_B.detach().cpu().numpy()
+        self.fake_A = fake_A.detach().cpu().numpy()
+        self.fake_B = fake_B.detach().cpu().numpy()
+        self.cycle_A = cycle_A.detach().cpu().numpy()
+        self.cycle_B = cycle_B.detach().cpu().numpy()
+        self.idt_A = idt_A.detach().cpu().numpy()
+        self.idt_B = idt_B.detach().cpu().numpy()
+        
+        gan_A_loss = self.cls_weight * cls_A_loss + self.cyc_weight * cycle_B_loss + self.idt_weight * idt_A_loss
+        gan_B_loss = self.cls_weight * cls_B_loss + self.cyc_weight * cycle_A_loss + self.idt_weight * idt_B_loss
+        
+        total_loss = gan_A_loss + gan_B_loss
 
-        self.fake_B = self.G_to_B(self.real_A)
-        self.fake_A = self.G_to_A(self.real_B)
+        return total_loss, {"G_to_A_loss": gan_A_loss.item(),
+                            "G_to_A_cls":  cls_A_loss.item(),
+                            "G_to_A_cyc":  cycle_A_loss.item(),
+                            "G_to_A_idt":  idt_A_loss.item(),
+                            "G_to_B_loss": gan_B_loss.item(),
+                            "G_to_B_cls":  cls_B_loss.item(),
+                            "G_to_B_cyc":  cycle_B_loss.item(),
+                            "G_to_B_idt":  idt_B_loss.item()
+                            }
 
-        self.cycle_A = self.G_to_A(self.fake_B)
-        self.cycle_B = self.G_to_B(self.fake_A)
+    def forward_disc(self, real_A, real_B):
+        self.G_to_A.eval().requires_grad_(False)
+        self.G_to_B.eval().requires_grad_(False)
+        self.D_A.train().requires_grad_(True)
+        self.D_B.train().requires_grad_(True)
 
-        self.idt_A = self.G_to_A(self.real_A)
-        self.idt_B = self.G_to_B(self.real_B)
-
-        fake_A_score = self.D_A(self.fake_A)
-        fake_B_score = self.D_B(self.fake_B)
-
-        G_to_A_cls = F.binary_cross_entropy(
-            fake_A_score, torch.ones_like(fake_A_score)
-        )
-
-        G_to_B_cls = F.binary_cross_entropy(
-            fake_B_score, torch.ones_like(fake_B_score)
-        )
-
-        G_to_A_cyc = F.l1_loss(self.real_A, self.cycle_A)
-        G_to_B_cyc = F.l1_loss(self.real_B, self.cycle_B)
-
-        G_to_A_idt = F.l1_loss(self.real_A, self.idt_A)
-        G_to_B_idt = F.l1_loss(self.real_B, self.idt_B)
-
-        G_to_A_loss = G_to_A_cls + self.cls_weight * \
-            G_to_A_cyc + self.idt_weight * G_to_A_idt
-        G_to_B_loss = G_to_B_cls + self.cls_weight * \
-            G_to_B_cyc + self.idt_weight * G_to_B_idt
-
-        loss = G_to_A_loss + G_to_B_loss
-
-        return loss, {"G_to_A_loss": G_to_A_loss,
-                      "G_to_A_cls": G_to_A_cls,
-                      "G_to_A_cyc": G_to_A_cyc,
-                      "G_to_A_idt": G_to_A_idt,
-                      "G_to_B_loss": G_to_B_loss,
-                      "G_to_B_cls": G_to_B_cls,
-                      "G_to_B_cyc": G_to_B_cyc,
-                      "G_to_B_idt": G_to_B_idt
-                      }
-
-    def forward_disc(self, source, target):
-        self.G_to_A.eval()
-        self.G_to_B.eval()
-        self.D_A.train()
-        self.D_B.train()
-
-        fake_B = self.G_to_B(source)
-        fake_A = self.G_to_A(target)
+        fake_B = self.G_to_B(real_A)
+        fake_A = self.G_to_A(real_B)
 
         fake_A_score = self.D_A(fake_A)
         fake_B_score = self.D_B(fake_B)
-        real_A_score = self.D_A(source)
-        real_B_score = self.D_B(target)
+        real_A_score = self.D_A(real_A)
+        real_B_score = self.D_B(real_B)
 
-        D_A_loss = F.binary_cross_entropy(
-            real_A_score, torch.ones_like(real_A_score)
-        ) + F.binary_cross_entropy(
-            fake_A_score, torch.zeros_like(fake_A_score)
-        )
-        D_A_loss = D_A_loss / 2
-
-        D_B_loss = F.binary_cross_entropy(
-            real_B_score, torch.ones_like(real_B_score)
-        ) + F.binary_cross_entropy(
-            fake_B_score, torch.zeros_like(fake_B_score)
-        )
-        D_B_loss = D_B_loss / 2
-
+        fake_A_score = F.binary_cross_entropy(fake_A_score, torch.zeros_like(fake_A_score))
+        fake_B_score = F.binary_cross_entropy(fake_B_score, torch.zeros_like(fake_B_score))
+        real_A_score = F.binary_cross_entropy(real_A_score, torch.ones_like(real_A_score))
+        real_B_score = F.binary_cross_entropy(real_B_score, torch.ones_like(real_B_score))
+        
+        D_A_loss = (fake_A_score + real_A_score) / 2
+        D_B_loss = (fake_B_score + real_B_score) / 2
+        
         loss = D_A_loss + D_B_loss
-
-        return loss, {"D_A_loss": D_A_loss,
-                      "D_B_loss": D_B_loss
+        loss.backward()
+        
+        return loss, {"D_A_loss": D_A_loss.item(),
+                      "D_B_loss": D_B_loss.item()
                       }

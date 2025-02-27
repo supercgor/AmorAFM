@@ -12,7 +12,7 @@ from typing import Literal
 from pathlib import Path
 
 from .utils import vec2box, make_grid_centers, make_grid_samples_points, masknms
-from .transform import blur_fn, cutout_fn, jitter_fn, noisy_fn, noise_label_fn, normalize_fn, pixel_shift_fn, random_remove_atoms_fn, z_layerwise_sampler, z_sampler
+from .transform import blur_fn, cutout_fn, flip_fn, jitter_fn, noisy_fn, noise_label_fn, normalize_fn, pixel_shift_fn, random_remove_atoms_fn, z_layerwise_sampler, z_sampler
 
 class DetectDataset(Dataset):
     def __init__(self, 
@@ -27,15 +27,14 @@ class DetectDataset(Dataset):
                  flipz: bool                                    = False,
                  z_align: str                                   = 'bottom',
                  random_transform: bool                         = True,
-                 random_noisy: float | bool                     = True,
-                 random_cutout                                  = True,
-                 random_jitter                                  = True,
                  random_blur                                    = 2.0,
+                 random_cutout                                  = True,
+                 random_flip                                    = False,
+                 random_jitter                                  = True,
+                 random_noisy: float | bool                     = True,
                  random_shift                                   = True,
-                 random_flipx                                   = False,
-                 random_flipy                                   = False,
-                 random_zoffset                                 = None,
                  random_top_remove_ratio                        = 0.0,
+                 random_zoffset                                 = None,
                  normalize: bool                                = True,
                  ):
         self.fname = Path(fname)
@@ -45,15 +44,14 @@ class DetectDataset(Dataset):
         self.real_size = real_size
         self.box_size = box_size
         self.random_transform = random_transform    
-        self.random_noisy = random_noisy
-        self.random_cutout = random_cutout
-        self.random_jitter = random_jitter
         self.random_blur = random_blur
+        self.random_cutout = random_cutout
+        self.random_flip = random_flip
+        self.random_jitter = random_jitter
+        self.random_noisy = random_noisy
         self.random_shift = random_shift
-        self.random_flipx = random_flipx
-        self.random_flipy = random_flipy
-        self.random_zoffset = random_zoffset
         self.random_top_remove_ratio = random_top_remove_ratio
+        self.random_zoffset = random_zoffset
         self.normalize = normalize
         
         # keys: list of file names or list of tuples (afm, label)
@@ -107,6 +105,8 @@ class DetectDataset(Dataset):
                 self.transform.append(noisy_fn(self.random_noisy))
             if self.random_blur:
                 self.transform.append(blur_fn())
+            if self.random_flip:
+                self.transform.append(flip_fn())
                 
         if self.random_transform and "label" in self.mode:
             if self.random_noisy:

@@ -4,7 +4,6 @@ import time
 import shutil
 import numpy as np
 import torch
-import utils
 
 from argparse import ArgumentParser
 from torch.utils.data import DataLoader
@@ -12,12 +11,12 @@ from torchmetrics import MeanMetric
 from torchmetrics.image import FrechetInceptionDistance as FID
 from matplotlib import pyplot as plt
 from pathlib import Path
-from utils import ItLoader
-from dataset import DetectDataset
-from network import CycleGAN
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from configs.cycleGAN import CycleGANConfig as Config
+from src.utils import ItLoader, MetricCollection, log_to_csv, get_logger
+from src.dataset import DetectDataset
+from src.network import CycleGAN
 
 def get_parser():
     parser = ArgumentParser()
@@ -34,7 +33,7 @@ class Trainer():
         self.outdir = Path(self.cfg.setting.outdir)
         self.outdir.mkdir(parents=True, exist_ok=True)
         self.device = torch.device(self.cfg.setting.device)
-        self.log = utils.get_logger(self.outdir)
+        self.log = get_logger(self.outdir)
 
         self.epoch = 0
         self.iters = 0
@@ -44,17 +43,6 @@ class Trainer():
 
         self.load_model()
         
-        self.G_opt = torch.optim.Adam(self.model.G_params,
-                                      lr=self.cfg.optimizer.lr,
-                                      betas=(0.5, 0.999))
-
-        self.D_opt = torch.optim.Adam(self.model.D_params,
-                                      lr=self.cfg.optimizer.lr / 4,
-                                      betas=(0.5, 0.999))
-
-        self.G_scheduler = torch.optim.lr_scheduler.StepLR(self.G_opt, **self.cfg.scheduler.params.__dict__)
-
-        self.D_scheduler = torch.optim.lr_scheduler.StepLR(self.D_opt, **self.cfg.scheduler.params.__dict__)
 
         self.A_dts = DetectDataset(
             cfg.dataset.source_path,
@@ -63,15 +51,11 @@ class Trainer():
             image_size=self.cfg.dataset.image_size,
             image_split=self.cfg.dataset.image_split,
             real_size=self.cfg.dataset.real_size,
-            box_size=(32, 32, 4),
-            random_transform=True,
-            random_noisy=0.05,
+            random_blur=0.0,
             random_cutout=True,
             random_jitter=False,
-            random_blur=0.0,
+            random_noisy=0.05,
             random_shift=True,
-            random_flipx=False,
-            random_flipy=False
         )
 
         # self.A_dts.key_filter(lambda x: 'icehup' in x)
@@ -83,14 +67,11 @@ class Trainer():
             image_size=self.cfg.dataset.image_size,
             image_split=self.cfg.dataset.image_split,
             real_size=self.cfg.dataset.real_size,
-            random_transform=True,
-            random_noisy=0.01,
             random_blur=0.0,
-            random_jitter=False,
             random_cutout=False,
+            random_jitter=False,
+            random_noisy=0.01,
             random_shift=False,
-            random_flipx=True,
-            random_flipy=True,
         )
 
         self.A_dtl_train = DataLoader(
@@ -129,7 +110,19 @@ class Trainer():
             collate_fn=DetectDataset.collate_fn,
         )
 
-        self.gen_metrics = utils.MetricCollection(
+        self.G_opt = torch.optim.Adam(self.model.G_params,
+                                      lr=self.cfg.optimizer.lr,
+                                      betas=(0.5, 0.999))
+
+        self.D_opt = torch.optim.Adam(self.model.D_params,
+                                      lr=self.cfg.optimizer.lr / 4,
+                                      betas=(0.5, 0.999))
+
+        self.G_scheduler = torch.optim.lr_scheduler.StepLR(self.G_opt, **self.cfg.scheduler.params.__dict__)
+
+        self.D_scheduler = torch.optim.lr_scheduler.StepLR(self.D_opt, **self.cfg.scheduler.params.__dict__)
+        
+        self.gen_metrics = MetricCollection(
             G_to_A_loss=MeanMetric(),
             G_to_A_grad=MeanMetric(),
             G_to_A_cls=MeanMetric(),
@@ -142,7 +135,7 @@ class Trainer():
             G_to_B_idt=MeanMetric(),
         ).to(self.device)
 
-        self.disc_metrics = utils.MetricCollection(
+        self.disc_metrics = MetricCollection(
             D_A_loss=MeanMetric(),
             D_A_grad=MeanMetric(),
             D_B_loss=MeanMetric(),
@@ -181,7 +174,6 @@ class Trainer():
                 self.G_opt.zero_grad()
 
                 loss, loss_values = self.model.forward_gen(source_afm, target_afm)
-                loss.backward()
 
                 G_to_A_grad = torch.nn.utils.clip_grad_norm_(self.model.G_to_A.parameters(), 10)
                 G_to_B_grad = torch.nn.utils.clip_grad_norm_(self.model.G_to_B.parameters(), 10)
@@ -197,7 +189,6 @@ class Trainer():
 
                 loss, loss_values = self.model.forward_disc(
                     source_afm, target_afm)
-                loss.backward()
 
                 D_A_grad = torch.nn.utils.clip_grad_norm_(
                     self.model.D_A.parameters(), 10)
@@ -213,24 +204,24 @@ class Trainer():
             self.iters += 1
 
             if i > 0 and i % self.cfg.setting.log_every == 0:
-                utils.log_to_csv(self.outdir / "train_cyc.csv",
+                log_to_csv(self.outdir / "train_cyc.csv",
                                  total=self.iters,
                                  **self.gen_metrics.compute(),
                                  **self.disc_metrics.compute())
 
                 fig = plt.figure(figsize=(15, 10))
-                savedir = self.outdir / "saved_images" / f"EP{self.epoch:02d}"
+                fig.suptitle(f"{source_filenames[0]} <-> {target_filenames[0]}")
+                
+                savedir = self.outdir / f"Epoch{self.epoch:02d}"
                 savedir.mkdir(exist_ok=True)
                 
                 plots = []
 
                 for images in [self.model.real_A, self.model.fake_B, self.model.cycle_A, self.model.fake_A, self.model.real_B, self.model.cycle_B]:
                     # B X Y Z C
-                    images = images[0, :, :, :9].detach(
-                    ).cpu().numpy()  # -> X Y Z C
+                    images = images[0, :, :, :9].detach().cpu().numpy()  # -> X Y Z C
                     images = images.transpose(2, 1, 0, 3)  # -> Z Y X C
-                    images = images.reshape(
-                        3, 3, *images.shape[1:])  # -> 3, 3, Y, X, C
+                    images = images.reshape(3, 3, *images.shape[1:])  # -> 3, 3, Y, X, C
                     images = np.concatenate(images, axis=1)  # -> 3, 3Y, X, C
                     images = np.concatenate(images, axis=1)  # -> 3Y, 3X, C
                     plots.append(images)
@@ -240,7 +231,7 @@ class Trainer():
                     ax.imshow(plots[j], origin="lower")
                     ax.set_title(title)
                 
-                plt.savefig(savedir / f"TRAIN-{i:05d}-{source_filenames[0]}-{target_filenames[0]}.png")
+                plt.savefig(savedir / f"train-{i:06d}.png")
 
                 plt.close()
 
@@ -268,23 +259,15 @@ class Trainer():
             fake_source = self.model.to_A(target_afm)  # B X Y Z C
             fake_target = self.model.to_B(source_afm)  # B X Y Z C
 
-            source_afm = source_afm.clamp(0, 1).mul_(255).to(torch.uint8)
-            target_afm = target_afm.clamp(0, 1).mul_(255).to(torch.uint8)
-            fake_source = fake_source.clamp(0, 1).mul_(255).to(torch.uint8)
-            fake_target = fake_target.clamp(0, 1).mul_(255).to(torch.uint8)
+            source_afm = (source_afm * 255).to(torch.uint8)
+            target_afm = (target_afm * 255).to(torch.uint8)
+            fake_source = (fake_source * 255).to(torch.uint8)
+            fake_target = (fake_target * 255).to(torch.uint8)
 
-            source_afm = source_afm.permute(0, 3, 4, 1,
-                                            2).flatten(0, 1).repeat(
-                                                1, 3, 1, 1)  # (B Z) C X Y
-            target_afm = target_afm.permute(0, 3, 4, 1,
-                                            2).flatten(0,
-                                                       1).repeat(1, 3, 1, 1)
-            fake_source = fake_source.permute(0, 3, 4, 1,
-                                              2).flatten(0,
-                                                         1).repeat(1, 3, 1, 1)
-            fake_target = fake_target.permute(0, 3, 4, 1,
-                                              2).flatten(0,
-                                                         1).repeat(1, 3, 1, 1)
+            source_afm = source_afm.permute(0, 3, 4, 1, 2).flatten(0, 1).repeat(1, 3, 1, 1)  # (B Z) C X Y
+            target_afm = target_afm.permute(0, 3, 4, 1, 2).flatten(0, 1).repeat(1, 3, 1, 1)
+            fake_source = fake_source.permute(0, 3, 4, 1, 2).flatten(0, 1).repeat(1, 3, 1, 1)
+            fake_target = fake_target.permute(0, 3, 4, 1, 2).flatten(0, 1).repeat(1, 3, 1, 1)
 
             self.source_fid.update(fake_source, False)
             self.source_fid.update(source_afm, True)
@@ -295,28 +278,24 @@ class Trainer():
             if i > 0 and i % self.cfg.setting.log_every == 0:
                 self.log.info(f"Test iteration {i:5d}/{len(self.A_dtl_test)}")
                 
-                savedir = self.outdir / "saved_images" / f"EP{self.epoch:02d}"
+                savedir = self.outdir / f"Epoch{self.epoch:02d}"
                 savedir.mkdir(exist_ok=True)
                 
                 for b, (source_filename, target_filename) in enumerate(zip(source_filenames, target_filenames)):
                     fig = plt.figure(figsize=(10, 10))
-
+                    fig.suptitle(f"{source_filename} <-> {target_filename}")
                     for j, images in enumerate([source_afm, target_afm, fake_source, fake_target]):
-                        images = images[b * Z:b * Z +
-                                        9].cpu().numpy()  # 9 C X Y
+                        images = images[b * Z:b * Z + 9].cpu().numpy()  # 9 C X Y
                         images = images.transpose(0, 3, 2, 1)  # 9 Y X C
-                        images = images.reshape(
-                            3, 3, *images.shape[1:])  # 3, 3, Y, X, C
+                        images = images.reshape(3, 3, *images.shape[1:])  # 3, 3, Y, X, C
                         images = np.concatenate(images, axis=1)  # 3, 3Y, X, C
                         images = np.concatenate(images, axis=1)  # 3Y, 3X, C
                         ax = fig.add_subplot(2, 2, 1 + j)
 
                         ax.imshow(images, origin="lower")
-                        ax.set_title(
-                            ["Source", "Target", "Fake Source", "Fake Target"][j])
-
+                        ax.set_title(["Source", "Target", "Fake Source", "Fake Target"][j])
                     
-                    plt.savefig(savedir / f"TEST-{source_filename}-{target_filename}.png")
+                    plt.savefig(savedir / f"test-{i:06d}.png")
                     plt.close()
 
             if self.cfg.setting.debug and i > 50:
@@ -369,13 +348,14 @@ def main():
 
     cfg = Config()
 
-    outdir = Path(args.outdir) / f"{time.strftime('%Y%m%d-%H%M%S')}-cycleGAN"
+    outdir = Path(args.outdir) / f"{time.strftime('%Y%m%d-%H%M%S')}-cycle"
     
     cfg.setting.device = args.device
     cfg.setting.outdir = str(outdir)
     cfg.setting.debug = args.debug
     
     if cfg.setting.debug:
+        cfg.setting.num_workers = 0
         cfg.setting.log_every = 1
         cfg.setting.batch_size = 2
         cfg.setting.max_save = 1
