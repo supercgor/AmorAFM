@@ -59,7 +59,7 @@ class Optimizer:
 @dataclass
 class Dataset:
     source_path: str = "dataset/.detect-train/afm"
-    target_path: str = ""
+    target_path: str = "dataset/.exp/afm"
     
     num_images: list[int] = field(default_factory=lambda: [4, 3, 3])
     image_size: tuple[int, int] = (100, 100)

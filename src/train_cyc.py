@@ -20,7 +20,7 @@ from src.network import CycleGAN
 
 def get_parser():
     parser = ArgumentParser()
-    parser.add_argument("--debug", action="store_true", help="Debug mode")
+    parser.add_argument("--debug", action="store_true", help="Debug mode", default=True)
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
     parser.add_argument("--outdir", type=str, default="outputs/", help="Working directory")
     
@@ -33,11 +33,10 @@ class Trainer():
         self.outdir = Path(self.cfg.setting.outdir)
         self.outdir.mkdir(parents=True, exist_ok=True)
         self.device = torch.device(self.cfg.setting.device)
-        self.log = get_logger(self.outdir)
+        self.log = get_logger('train', self.outdir)
 
         self.epoch = 0
         self.iters = 0
-        self.max_iters = 10000
 
         self.model = CycleGAN(**cfg.model.params.__dict__).to(self.device)
 
@@ -57,15 +56,11 @@ class Trainer():
             random_noisy=0.05,
             random_shift=True,
         )
-
-        # self.A_dts.key_filter(lambda x: 'icehup' in x)
-
+        
         self.B_dts = DetectDataset(
             cfg.dataset.target_path,
             mode='afm',
-            num_images=self.cfg.dataset.num_images,
             image_size=self.cfg.dataset.image_size,
-            image_split=self.cfg.dataset.image_split,
             real_size=self.cfg.dataset.real_size,
             random_blur=0.0,
             random_cutout=False,
@@ -83,28 +78,30 @@ class Trainer():
             collate_fn=DetectDataset.collate_fn,
         )
 
+        collate_fn = DetectDataset.collate_fn
+
         self.B_dtl_train = DataLoader(
             self.B_dts,
             batch_size=self.cfg.setting.batch_size,
             sampler=ItLoader(self.B_dts, self.cfg.setting.max_iters, True),
             num_workers=self.cfg.setting.num_workers,
             pin_memory=self.cfg.setting.pin_memory,
-            collate_fn=DetectDataset.collate_fn,
+            collate_fn=collate_fn,
         )
 
         self.A_dtl_test = DataLoader(
             self.A_dts,
             batch_size=self.cfg.setting.batch_size,
-            sampler=ItLoader(self.A_dts, 1600, True),
+            sampler=ItLoader(self.A_dts, self.cfg.setting.max_iters, True),
             num_workers=self.cfg.setting.num_workers,
             pin_memory=self.cfg.setting.pin_memory,
-            collate_fn=DetectDataset.collate_fn,
+            collate_fn=collate_fn,
         )
-
+        
         self.B_dtl_test = DataLoader(
             self.B_dts,
             batch_size=self.cfg.setting.batch_size,
-            sampler=ItLoader(self.B_dts, 1600, True),
+            sampler=ItLoader(self.B_dts, self.cfg.setting.max_iters, True),
             num_workers=self.cfg.setting.num_workers,
             pin_memory=self.cfg.setting.pin_memory,
             collate_fn=DetectDataset.collate_fn,
@@ -204,43 +201,19 @@ class Trainer():
             self.iters += 1
 
             if i > 0 and i % self.cfg.setting.log_every == 0:
-                log_to_csv(self.outdir / "train_cyc.csv",
+                log_to_csv(self.outdir / "train.csv",
                                  total=self.iters,
                                  **self.gen_metrics.compute(),
                                  **self.disc_metrics.compute())
 
-                fig = plt.figure(figsize=(15, 10))
-                fig.suptitle(f"{source_filenames[0]} <-> {target_filenames[0]}")
-                
                 savedir = self.outdir / f"Epoch{self.epoch:02d}"
                 savedir.mkdir(exist_ok=True)
-                
-                plots = []
 
-                for images in [self.model.real_A, self.model.fake_B, self.model.cycle_A, self.model.fake_A, self.model.real_B, self.model.cycle_B]:
-                    # B X Y Z C
-                    images = images[0, :, :, :9].detach().cpu().numpy()  # -> X Y Z C
-                    images = images.transpose(2, 1, 0, 3)  # -> Z Y X C
-                    images = images.reshape(3, 3, *images.shape[1:])  # -> 3, 3, Y, X, C
-                    images = np.concatenate(images, axis=1)  # -> 3, 3Y, X, C
-                    images = np.concatenate(images, axis=1)  # -> 3Y, 3X, C
-                    plots.append(images)
-
-                for j, title in enumerate(["Source", "Fake B", "Rec A", "Fake A", "Target", "Rec B"]):
-                    ax = fig.add_subplot(2, 3, j+1)
-                    ax.imshow(plots[j], origin="lower")
-                    ax.set_title(title)
-                
-                plt.savefig(savedir / f"train-{i:06d}.png")
-
-                plt.close()
+                self.model.plot(savedir / f"train-{i:06d}.png", f"{source_filenames[0]} <-> {target_filenames[0]}")                
 
                 self.gen_metrics.reset()
                 self.disc_metrics.reset()
                 self.log.info(f"Iteration {i:5d}/{len(self.A_dtl_train)}")
-
-            if self.cfg.setting.debug and i > 100:
-                break
 
         self.G_scheduler.step()
         self.D_scheduler.step()
@@ -252,22 +225,22 @@ class Trainer():
         for i, ((source_filenames, source_afm, _, _),
                 (target_filenames, target_afm, _,
                  _)) in enumerate(zip(self.A_dtl_test, self.B_dtl_test)):
-            Z = source_afm.shape[3]
+            
             source_afm = source_afm.to(self.device, non_blocking=True)
             target_afm = target_afm.to(self.device, non_blocking=True)
 
-            fake_source = self.model.to_A(target_afm)  # B X Y Z C
-            fake_target = self.model.to_B(source_afm)  # B X Y Z C
+            fake_source = self.model.to_A(target_afm)
+            fake_target = self.model.to_B(source_afm)
 
             source_afm = (source_afm * 255).to(torch.uint8)
             target_afm = (target_afm * 255).to(torch.uint8)
             fake_source = (fake_source * 255).to(torch.uint8)
             fake_target = (fake_target * 255).to(torch.uint8)
 
-            source_afm = source_afm.permute(0, 3, 4, 1, 2).flatten(0, 1).repeat(1, 3, 1, 1)  # (B Z) C X Y
-            target_afm = target_afm.permute(0, 3, 4, 1, 2).flatten(0, 1).repeat(1, 3, 1, 1)
-            fake_source = fake_source.permute(0, 3, 4, 1, 2).flatten(0, 1).repeat(1, 3, 1, 1)
-            fake_target = fake_target.permute(0, 3, 4, 1, 2).flatten(0, 1).repeat(1, 3, 1, 1)
+            source_afm = source_afm.transpose(1, 2).flatten(0, 1).repeat(1, 3, 1, 1)  # (B Z) C X Y
+            target_afm = target_afm.transpose(1, 2).flatten(0, 1).repeat(1, 3, 1, 1)
+            fake_source = fake_source.transpose(1, 2).flatten(0, 1).repeat(1, 3, 1, 1)
+            fake_target = fake_target.transpose(1, 2).flatten(0, 1).repeat(1, 3, 1, 1)
 
             self.source_fid.update(fake_source, False)
             self.source_fid.update(source_afm, True)
@@ -281,25 +254,7 @@ class Trainer():
                 savedir = self.outdir / f"Epoch{self.epoch:02d}"
                 savedir.mkdir(exist_ok=True)
                 
-                for b, (source_filename, target_filename) in enumerate(zip(source_filenames, target_filenames)):
-                    fig = plt.figure(figsize=(10, 10))
-                    fig.suptitle(f"{source_filename} <-> {target_filename}")
-                    for j, images in enumerate([source_afm, target_afm, fake_source, fake_target]):
-                        images = images[b * Z:b * Z + 9].cpu().numpy()  # 9 C X Y
-                        images = images.transpose(0, 3, 2, 1)  # 9 Y X C
-                        images = images.reshape(3, 3, *images.shape[1:])  # 3, 3, Y, X, C
-                        images = np.concatenate(images, axis=1)  # 3, 3Y, X, C
-                        images = np.concatenate(images, axis=1)  # 3Y, 3X, C
-                        ax = fig.add_subplot(2, 2, 1 + j)
-
-                        ax.imshow(images, origin="lower")
-                        ax.set_title(["Source", "Target", "Fake Source", "Fake Target"][j])
-                    
-                    plt.savefig(savedir / f"test-{i:06d}.png")
-                    plt.close()
-
-            if self.cfg.setting.debug and i > 50:
-                break
+                self.model.plot(savedir / f"test-{i:06d}.png", f"{source_filenames[0]} <-> {target_filenames[0]}")
 
         return self.source_fid.compute(), self.target_fid.compute()
 
@@ -360,6 +315,7 @@ def main():
         cfg.setting.batch_size = 2
         cfg.setting.max_save = 1
         cfg.setting.epoch = 5
+        cfg.setting.max_iters = 10
     
     try:
         start_time = time.time()

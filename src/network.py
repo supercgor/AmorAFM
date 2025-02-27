@@ -5,6 +5,8 @@ import torch
 from abc import abstractmethod
 from functools import partial
 from itertools import chain
+from matplotlib import pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from typing import Any
 from torch import nn, Tensor
 from torch.nn import functional as F
@@ -677,6 +679,8 @@ class UNetND(nn.Module):
         self.out_mult = out_mult
         self.conv_resample = conv_resample
         self.dtype = torch.float
+        self.inp_transform = lambda x: x
+        self.out_transform = lambda x: x.permute(0, 3, 4, 2, 1).sigmoid()
         
         self.cls_weight = cls_weight or 1.0
         self.xy_weight = xy_weight or 0.5
@@ -877,14 +881,6 @@ class UNetND(nn.Module):
                      self.z_weight * loss_z
 
         return total_loss, {'conf': loss_c, 'xy': loss_xy, 'z': loss_z}
-
-    def inp_transform(self, x):
-        # B C Z H W
-        return x
-
-    def out_transform(self, x):
-        # B C Z W H -> B W H Z C
-        return x.permute(0, 3, 4, 2, 1).sigmoid()
 
 
 class CVAE3D(nn.Module):
@@ -1126,7 +1122,6 @@ class CVAE3D(nn.Module):
     def dtype(self):
         return next(self.parameters()).dtype
 
-
 class GANDiscriminator(nn.Module):
     def __init__(self,
                  in_channels,
@@ -1147,8 +1142,10 @@ class GANDiscriminator(nn.Module):
             layer.add_module(f"bn{i}", nn.InstanceNorm3d(out_ch))
             layer.add_module(f"act{i}", nn.LeakyReLU(0.2, True))
             self.block.add_module(f"layer{i}", layer)
-        self.out = conv_nd(
-            3, channels_mult[-1] * model_channels, 1, kernel_size=1)
+        self.out = conv_nd(3, channels_mult[-1] * model_channels, 1, kernel_size=1)
+        
+        self.inp_transform = lambda x: x
+        self.out_transform = lambda x: x.sigmoid()
 
     def forward(self, inputs):
         x = self.inp_transform(inputs)
@@ -1156,13 +1153,6 @@ class GANDiscriminator(nn.Module):
             x = module(x)
         x = self.out(x)
         return self.out_transform(x)
-
-    def inp_transform(self, inp):
-        return torch.permute(inp, (0, 4, 3, 1, 2))  # B X Y Z C -> B C Z X Y
-
-    def out_transform(self, out):
-        return torch.permute(out, (0, 3, 4, 2, 1)).sigmoid_()
-
 
 class CycleGAN(nn.Module):
     def __init__(self,
@@ -1240,6 +1230,9 @@ class CycleGAN(nn.Module):
 
         self.G_params = chain(self.G_to_A.parameters(), self.G_to_B.parameters())
         self.D_params = chain(self.D_A.parameters(), self.D_B.parameters())
+        self.G_to_A.out_transform = lambda x: x.sigmoid()
+        self.G_to_B.out_transform = lambda x: x.sigmoid()
+        
         self.cls_weight = 1.0
         self.cyc_weight = 10.0
         self.idt_weight = 0.5
@@ -1278,13 +1271,13 @@ class CycleGAN(nn.Module):
         
         (cls_B_loss * self.cls_weight + cycle_A_loss * self.cyc_weight).backward()
         
-        idt_A = self.to_A(real_A)
+        idt_A = self.G_to_A(real_A)
         
         idt_A_loss = F.l1_loss(real_A, idt_A)
         
         (idt_A_loss * self.idt_weight).backward()
         
-        idt_B = self.to_B(real_B)
+        idt_B = self.G_to_B(real_B)
         
         idt_B_loss = F.l1_loss(real_B, idt_B)
         
@@ -1342,3 +1335,62 @@ class CycleGAN(nn.Module):
         return loss, {"D_A_loss": D_A_loss.item(),
                       "D_B_loss": D_B_loss.item()
                       }
+
+    def plot(self, path, title):
+        fig = plt.figure()
+        font_size = 12
+        
+        H, W = self.real_A.shape[3], self.real_A.shape[4]
+        font_height = (font_size + 2) * fig.dpi / 72
+        
+        real_A = self.real_A[0, 0, :9].reshape(3, 3, H, W).transpose(0, 2, 1, 3).reshape(3 * H, 3 * W)
+        real_B = self.real_B[0, 0, :9].reshape(3, 3, H, W).transpose(0, 2, 1, 3).reshape(3 * H, 3 * W)
+        fake_A = self.fake_A[0, 0, :9].reshape(3, 3, H, W).transpose(0, 2, 1, 3).reshape(3 * H, 3 * W)
+        fake_B = self.fake_B[0, 0, :9].reshape(3, 3, H, W).transpose(0, 2, 1, 3).reshape(3 * H, 3 * W)
+        cycle_A = self.cycle_A[0, 0, :9].reshape(3, 3, H, W).transpose(0, 2, 1, 3).reshape(3 * H, 3 * W)
+        cycle_B = self.cycle_B[0, 0, :9].reshape(3, 3, H, W).transpose(0, 2, 1, 3).reshape(3 * H, 3 * W)
+        idt_A = self.idt_A[0, 0, :9].reshape(3, 3, H, W).transpose(0, 2, 1, 3).reshape(3 * H, 3 * W)
+        idt_B = self.idt_B[0, 0, :9].reshape(3, 3, H, W).transpose(0, 2, 1, 3).reshape(3 * H, 3 * W)
+        
+        # First row: real_a | fake_b | cycle_a | idt_b
+        # Create a grid of images
+        images = [
+            [real_A, fake_B, cycle_A, idt_B],
+            [fake_A, real_B, cycle_B, idt_A]
+        ]
+        
+        titles = [
+            ["Real A", "Fake B", "Cycle A", "IDT B"],
+            ["Fake A", "Real B", "Cycle B", "IDT A"] 
+        ]
+        
+        # Concatenate images horizontally and vertically
+        top_row = np.concatenate(images[0], axis=-1)
+        bottom_row = np.concatenate(images[1], axis=-1)
+
+        fig.suptitle(title, fontsize=font_size)
+        # Plot the combined grid
+        ax1, ax2 = fig.subplots(2, 1)
+        im1 = ax1.imshow(top_row)
+        ax1.set_axis_off()
+        im2 = ax2.imshow(bottom_row)
+        ax2.set_axis_off()
+        
+        divider = make_axes_locatable(ax1)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plt.colorbar(im1, cax=cax)
+        
+        divider = make_axes_locatable(ax2)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plt.colorbar(im2, cax=cax)
+
+        # Add titles
+        for j in range(4):
+            ax1.text(j*images[0][0].shape[1] + images[0][0].shape[1]/2, 0, titles[0][j], 
+                     horizontalalignment='center', color='black', fontsize=12)
+            ax2.text(j*images[1][0].shape[1] + images[1][0].shape[1]/2, 0, titles[1][j],
+                     horizontalalignment='center', color='black', fontsize=12)
+        
+        fig.tight_layout()
+        fig.savefig(path)
+        plt.close(fig)
