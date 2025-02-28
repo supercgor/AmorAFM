@@ -12,7 +12,7 @@ from scipy.spatial.transform import Rotation as R
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from src.const import Ih_positions, Ih_cell
-from src.utils import box2atom, water_solver, vec2box
+from src.utils import box2atom, water_solver, vec2box, write_water_data
 from src.network import UNetND, CVAE3D
 from src.dataset import DetectDataset
 from configs.cVAE import cVAEConfig
@@ -34,6 +34,8 @@ def parse_args():
                         default="dataset/pretrain-det.pkl")
     parser.add_argument('--match-model', type=str, help='Path to the cVAE model',
                         default="dataset/pretrain-vae.pkl")
+    parser.add_argument('--save-immediate', action='store_true',
+                        help='Save the intermediate results')
 
     parser.add_argument('-d', '--detect-only',
                         action='store_true', help='Only detect the AFM images')
@@ -83,6 +85,7 @@ def main(args):
     det_model_path = Path(args.detect_model)
     mat_model_path = Path(args.match_model)
     out_path = Path(args.output)
+    out_path.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
     amorphous_part: Atoms | None = None
     print(f"Processing: {path}")
@@ -133,13 +136,18 @@ def main(args):
 
         print("Combining AFM images...")
 
-        raw_atoms = train_dts.combine_label_crop(pre_atoms, nms=False)
-        io.write(out_path / f"{path.stem}_afm.xyz", raw_atoms)
+        if args.save_immediate:
+            raw_atoms = train_dts.combine_label_crop(pre_atoms, nms=False)
+            io.write(out_path / f"{path.stem}_afm.xyz", raw_atoms)
 
         pre_atoms_combine = train_dts.combine_label_crop(pre_atoms)
 
         amorphous_part = water_solver(pre_atoms_combine)
-        io.write(out_path / f"{path.stem}_water.xyz", amorphous_part) # type: ignore
+        
+        if args.output_format == 'xyz':
+            io.write(out_path / f"{path.stem}_water.xyz", amorphous_part) # type: ignore
+        elif args.output_format == 'data':
+            write_water_data(out_path / f"{path.stem}_water.data", amorphous_part.positions, amorphous_part.cell.array) 
         
     if args.match_only or not args.detect_only:
         print("Generating crystal part...")
@@ -176,8 +184,10 @@ def main(args):
 
         out = net.conditional_sample(box[None], resample=False).cpu().numpy()[0]
 
-        out_atoms = box2atom(out, cfg.dataset.real_size, 0.3, cutoff=2.0, nms=True)
-        io.write(out_path / f"{path.stem}_match.xyz", out_atoms)
+        out_atoms = box2atom(out, cfg.dataset.real_size, 0.5, cutoff=2.0, nms=True)
+        
+        if args.save_immediate:
+            io.write(out_path / f"{path.stem}_match.xyz", out_atoms)
 
         
         out_crystal_part: Atoms = out_atoms[out_atoms.positions[:, 2] < 12] # type: ignore
@@ -222,7 +232,11 @@ def main(args):
         results = crystal_part + amorphous_part
         results.cell[2, 2] += args.z_padding
         
-        io.write(out_path / f"{path.stem}_combine.xyz", results)
+        if args.output_format == 'xyz':
+            io.write(out_path / f"{path.stem}_combine.xyz", results)
+        elif args.output_format == 'data':
+            write_water_data(out_path / f"{path.stem}_combine.data", results.positions, results.cell.array)
+        
         print(f"Done! Results are saved in {out_path}")
         
 if __name__ == '__main__':
