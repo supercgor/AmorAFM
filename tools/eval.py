@@ -31,9 +31,9 @@ def parse_args():
     parser.add_argument('--device', type=str,
                         help='Device to use', default='cuda')
     parser.add_argument('--detect-model', type=str, help='Path to the pretrain model',
-                        default="/mnt/e/simu_data/pretrain-det.pkl")
+                        default="dataset/pretrain-det.pkl")
     parser.add_argument('--match-model', type=str, help='Path to the cVAE model',
-                        default="/mnt/e/simu_data/pretrain-vae.pkl")
+                        default="dataset/pretrain-vae.pkl")
 
     parser.add_argument('-d', '--detect-only',
                         action='store_true', help='Only detect the AFM images')
@@ -93,7 +93,7 @@ def main(args):
         cfg = DetectConfig()
         net = UNetND(**cfg.model.params.__dict__)
 
-        net.load_state_dict(torch.load(det_model_path))
+        net.load_state_dict(torch.load(det_model_path, map_location=device), strict=True)
         net.to(device).eval().requires_grad_(False)
 
         train_dts = DetectDataset(path,
@@ -151,7 +151,7 @@ def main(args):
         cfg = cVAEConfig()
         net = CVAE3D(**cfg.model.params.__dict__)
 
-        net.load_state_dict(torch.load(mat_model_path), strict=True)
+        net.load_state_dict(torch.load(mat_model_path, map_location=device), strict=True)
         net.to(device).eval().requires_grad_(False)
         
         o_combine_atoms: Atoms = amorphous_part[amorphous_part.numbers == 8] # type: ignore
