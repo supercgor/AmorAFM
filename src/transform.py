@@ -35,7 +35,7 @@ def z_layerwise_sampler(use: list[int] = [4, 4, 3],
 
 OptArray = TypeVar('NDArray')
 OptAtoms = TypeVar('Atoms')
-type transform_fn = Callable[[OptArray, OptAtoms], tuple[OptArray, OptAtoms]]
+transform_fn = Callable[[OptArray, OptAtoms], tuple[OptArray, OptAtoms]]
 
 def noisy_fn(max_intensity: float | bool = 0.03) -> transform_fn:
     if isinstance(max_intensity, bool):
