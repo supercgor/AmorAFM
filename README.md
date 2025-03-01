@@ -1,40 +1,33 @@
-# Unveiling the phase diagram of ice premelting through a novel machine learning framework integrating AFM Technology
+# Unveiling the amorphous ice layer during ice premelting using AFM integrating machine learning
 
 by
 Binze Tang†, 
 Chon-Hei Lo†,
 Tiancheng Liang†,
 Jiani Hong†,
+Mian Qin,
+Yizhi Song,
+Duanyun Cao,
 Ying Jiang*, 
 Limei Xu*,
-et. al.
 
-> Machine learning Framework for Amorphous Ice Layer Detection on AFM images.
+> Machine learning framework for reconstructing bulk ice surface structure from AFM images.
 
 <!-- ![](manuscript/figures/hawaii-trend.png) -->
 
 <!-- *Caption for the example figure with the main results.* -->
-
-## Abstract
-
-Ice premelting plays a key role in atmospheric and biological processes but remains
-poorly understood at the atomic level due to surface characterization limitations. We
-report the discovery of a novel amorphous ice layer (AIL) preceding the quasi-liquid
-layer (QLL), enabled by a machine learning framework integrating atomic force
-microscopy (AFM) with molecular dynamics simulations. This approach overcomes
-AFM's depth and signal limitations, allowing for three-dimensional surface structure
-reconstruction from AFM images. We identify the AIL, present between 121-180K,
-displaying disordered two-dimensional hydrogen-bond network with solid-like
-dynamics, thereby refining the phase diagram of ice premelting. These results challenge
-the conventional view that significant hydrogen-bond disorder is exclusive to the QLL
-and offer new insights into surface growth dynamics, advancing AFM for three-
-dimensional disordered interface studies.
 
 
 ## Software implementation
 
 > Briefly describe the software that was written to produce the results of this
 > paper.
+
+This repository contains code for a novel ML-AFM framework for 3D atomic reconstruction of disordered interfaces, exemplified by ice surfaces, directly from Atomic Force Microscopy (AFM) data. To address the challenges of AFM's limited depth sensitivity and signal complexity in characterizing 3D disordered interfacial structures, our framework uniquely integrates three neural networks:
+
+CycleGAN (Noise Augmentation): Enhances robustness by learning realistic noise from experimental AFM images and augmenting simulated training data.
+3D U-Net-like Object Detection Network: Precisely identifies the top-layer atomic structure from AFM signals.
+Conditional Variational Autoencoder (cVAE) Structure Generation Network: Infers the complete 3D structure by generating subsurface layers conditioned on the detected top-layer.
 
 This repository is maintained by Chon-Hei Lo. 
 To train a new model, run the code in `src/train_*.py`
@@ -97,9 +90,32 @@ To predict the AFM images, you should prepare directories as follows:
 -  ┣ 📜 ...
 -  ┣ 📜 cell.txt
 
+AFM Images: Saved as .png files and named sequentially in ascending order of tip-sample distance.
+cell.txt: This file contains a comment line followed by a line with two numbers specifying the width and height of the AFM images in nm.
+
 Run the code:
 
     python3 tools/eval.py -i dataset/ss0
+
+Running the Object Detection Network on CPU:
+
+    python3 tools/eval.py -i dataset/ss --detect-only
+
+This will let the network predict the topmost layer structure based on the input AFM images located in dataset/ss0. The predicted structure will be saved in .xyz format. 
+Before proceeding to generate the complete 3D structure, you can manually modify the predicted topmost layer structure (e.g., using structure editing software), or adjust the hydrogen orientation of the topmost layer through energy minimization techniques.
+Refer to the paper for detailed guidance on these optional steps and their potential benefits.
+
+Running the Generation Network on CPU:
+
+    python3 tools/eval.py -i dataset/ss.xyz --match-only
+
+With the topmost layer structure already predicted (or provided), this command will trigger the generation network to reconstruct the complete 3D structure. The network utilizes the topmost layer structure as a conditional input to infer the underlying layers.
+After generating the complete 3D structure, you can proceed further simulations and analyses as detailed in the paper's instructions.
+
+To get help on the command line options, run:
+
+    python3 tools/eval.py --help
+
 
 ## License
 

@@ -28,8 +28,8 @@ def parse_args():
     parser.add_argument('-f', '--output-format', type=str,
                         help='Output format', choices=['xyz', 'data'], default='xyz')
 
-    parser.add_argument('--device', type=str,
-                        help='Device to use', default='cuda')
+    parser.add_argument('--device', type=str, help='Device to use', 
+                        choices=['cpu', 'cuda'], default='cpu')
     parser.add_argument('--detect-model', type=str, help='Path to the pretrain model',
                         default="dataset/pretrain-det.pkl")
     parser.add_argument('--match-model', type=str, help='Path to the cVAE model',
@@ -41,13 +41,16 @@ def parse_args():
                         action='store_true', help='Only detect the AFM images')
     parser.add_argument('-m', '--match-only', action='store_true',
                         help='Only match the crystal part')
-    parser.add_argument('--z-ref', type=float, default=0.5,
+    parser.add_argument('--z-ref', type=float, default=1.0,
                         help='The reference z value for the crystal part')
     parser.add_argument('--z-padding', type=float, default=20.0,
                         help='The padding value after combining the crystal part and amorphous part in z direction')
     return parser.parse_args()
 
 def find_best(atoms, s_tag=0.5, n=10):
+    atoms = atoms.copy()
+    atoms_cell = atoms.cell.array
+    atoms.positions[:, :2] -= (atoms_cell[0, 0] / 2, atoms_cell[1, 1] / 2)
     pos = Ih_positions[::3] % np.diag(Ih_cell)
     atree = KDTree(pos, boxsize=np.diag(Ih_cell))
     a, z = Ih_cell[0, 0] / 3, Ih_cell[2, 2]
@@ -106,7 +109,8 @@ def main(args):
                                 image_split=None,
                                 real_size=cfg.dataset.real_size,
                                 box_size=(32, 32, 4),
-                                random_transform=False
+                                random_transform=False,
+                                normalize=False
                                 )
 
         pre_atoms = []
@@ -166,12 +170,12 @@ def main(args):
         o_pos = o_combine_atoms.positions
 
         o_cell = np.diag(o_combine_atoms.cell.array)
+        real_size = np.array([25.0, 25.0, 4.0])
         o_center = np.array([o_cell[0] / 2, o_cell[1] / 2, -args.z_ref])
 
-        o_pos += np.array([cfg.dataset.real_size[0] / 2 - o_cell[0] / 2,
-                        cfg.dataset.real_size[1] / 2 - o_cell[1] / 2, o_center[2]])
-
-        real_size = np.array([25.0, 25.0, 4.0])
+        o_pos += np.array([real_size[0] / 2 - o_cell[0] / 2,
+                           real_size[1] / 2 - o_cell[1] / 2,
+                           o_center[2]])
 
         o_pos = o_pos[np.all(o_pos > 0, axis=1) &
                     np.all(o_pos < real_size, axis=1)]
@@ -223,8 +227,8 @@ def main(args):
         
         amorphous_part.positions[:, :2] -= (o_cell[0] / 2, o_cell[1] / 2)
         amorphous_part.positions = R.from_euler('z', ang).apply(amorphous_part.positions)
-        amorphous_part.positions += (best_param[0] + cell_x * Ih_cell[0, 0] / 2,
-                                     best_param[1] + cell_y * Ih_cell[1, 1] / 2,
+        amorphous_part.positions += (best_param[0] + (cell_x // 2) * Ih_cell[0, 0],
+                                     best_param[1] + (cell_y // 2) *  Ih_cell[1, 1],
                                      best_param[2] + cell_z * Ih_cell[2, 2] - args.z_ref)
         
         amorphous_part.arrays['id'] += len(crystal_part)
