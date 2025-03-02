@@ -95,7 +95,7 @@ cell.txt: This file contains a comment line followed by a line with two numbers 
 
 Run the code:
 
-    python3 tools/eval.py -i dataset/ss0
+    python3 tools/eval.py -i dataset/ss
 
 Running the Object Detection Network on CPU:
 
